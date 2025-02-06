@@ -88,6 +88,15 @@ class DeepSeekWrapper:
         self.config = model_data["config"]
         self.tokenizer = model_data["tokenizer"]
         
+        # Map config keys to expected names
+        config_mapping = {
+            'hidden_size': 'dim',
+            'num_hidden_layers': 'n_layers',
+            'num_attention_heads': 'n_heads',
+            'intermediate_size': 'inter_dim',
+            'max_sequence_length': 'max_seq_len'
+        }
+        
         # Filter config to only include expected arguments
         model_config = {}
         expected_args = [
@@ -98,9 +107,16 @@ class DeepSeekWrapper:
             'qk_rope_head_dim', 'v_head_dim', 'original_seq_len', 'rope_theta', 'rope_factor',
             'beta_fast', 'beta_slow', 'mscale'
         ]
+        
+        # First try direct mapping
         for key in expected_args:
             if key in self.config:
                 model_config[key] = self.config[key]
+            # Try mapped key names
+            elif key in config_mapping.values():
+                for old_key, new_key in config_mapping.items():
+                    if new_key == key and old_key in self.config:
+                        model_config[key] = self.config[old_key]
         
         # Update config for model size
         if "model_type" in self.config:

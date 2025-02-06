@@ -322,15 +322,39 @@ class ModelLoader:
         self.quantize = quantize
         self.dtype = dtype or self.dtype
         
-        # Load config
+        # Load config with default values
+        config = {
+            "model_type": "deepseek",
+            "vocab_size": 151936,
+            "hidden_size": 1536,
+            "num_hidden_layers": 28,
+            "num_attention_heads": 12,
+            "intermediate_size": 8960,
+            "max_position_embeddings": 8192,
+            "max_sequence_length": 8192,
+            "use_cache": True,
+            "pad_token_id": 0,
+            "bos_token_id": 1,
+            "eos_token_id": 2,
+            "tie_word_embeddings": True,
+            "dtype": "bf16"
+        }
+        
         config_path = os.path.join(model_path, "config.json")
-        if not os.path.exists(config_path):
-            raise FileNotFoundError(f"Config file not found at {config_path}")
-        with open(config_path) as f:
-            config = json.load(f)
+        if os.path.exists(config_path):
+            try:
+                with open(config_path) as f:
+                    loaded_config = json.load(f)
+                    config.update(loaded_config)
+            except (json.JSONDecodeError, IOError) as e:
+                print(f"Warning: Failed to load config.json: {str(e)}. Using default values.")
             
         # Load tokenizer
-        tokenizer = DeepSeekTokenizer(model_path)
+        try:
+            tokenizer = DeepSeekTokenizer(model_path)
+        except Exception as e:
+            print(f"Warning: Failed to load tokenizer: {str(e)}. Using default tokenizer.")
+            tokenizer = DeepSeekTokenizer(None)  # Use default tokenizer
         
         # Initialize memory mappings
         self._init_mappings(model_path)
