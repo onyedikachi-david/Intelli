@@ -163,13 +163,18 @@ class ModelLoader:
             shard_path = os.path.join(model_path, shard)
             if os.path.exists(shard_path):
                 with safe_open(shard_path, framework="pt") as f:
+                    metadata = f.metadata()
                     for tensor_name in f.keys():
                         tensor = f.get_tensor(tensor_name)
+                        # Get tensor offset from metadata
+                        tensor_info = metadata.get(tensor_name, {})
+                        offset = tensor_info.get("data_offsets", [0])[0] if tensor_info else 0
+                        
                         self.tensor_info[tensor_name] = TensorInfo(
                             name=tensor_name,
                             shape=tuple(tensor.shape),
                             dtype=self._get_tensor_type(tensor.dtype),
-                            offset=f.get_tensor_info(tensor_name)["data_offsets"][0],
+                            offset=offset,
                             file_idx=list(index["weight_map"].values()).index(shard)
                         )
                         self.size_data += np.prod(tensor.shape) * self._get_dtype_size(tensor.dtype)
