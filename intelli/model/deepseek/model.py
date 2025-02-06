@@ -77,15 +77,28 @@ class RotaryEmbedding(nn.Module):
         self.inv_freq = self.inv_freq.to(x.device)
         
         # Only apply rotary embeddings to first self.dim dimensions
-        x_rot = x[..., :self.dim*2]
-        x_pass = x[..., self.dim*2:]
+        x_rot = x[..., :self.dim]
+        x_pass = x[..., self.dim:]
         
         t = torch.arange(start_pos, start_pos + x.size(1), device=x.device)
-        freqs = torch.einsum("i,j->ij", t, self.inv_freq)
-        emb = torch.cat((freqs, freqs), dim=-1)
+        freqs = torch.einsum("i,j->ij", t, self.inv_freq)  # [T, dim/2]
         
-        x_rot = x_rot * emb.cos() + torch.roll(x_rot, shifts=1, dims=-1) * emb.sin()
-        return torch.cat((x_rot, x_pass), dim=-1)
+        # Create cos/sin embeddings
+        freqs = torch.cat((freqs, freqs), dim=-1)  # [T, dim]
+        cos = freqs.cos().unsqueeze(0).unsqueeze(2)  # [1, T, 1, dim]
+        sin = freqs.sin().unsqueeze(0).unsqueeze(2)  # [1, T, 1, dim]
+        
+        # Reshape x_rot for rotation
+        x_rot_a, x_rot_b = x_rot.chunk(2, dim=-1)  # Split along last dim
+        
+        # Apply rotation
+        rotated = torch.cat([
+            x_rot_a * cos - x_rot_b * sin,
+            x_rot_b * cos + x_rot_a * sin,
+        ], dim=-1)
+        
+        # Concatenate with pass-through values
+        return torch.cat((rotated, x_pass), dim=-1) if x_pass.size(-1) > 0 else rotated
 
 
 class Attention(nn.Module):
@@ -106,6 +119,9 @@ class Attention(nn.Module):
         self.rope = RotaryEmbedding(args)
         self.scale = self.head_dim ** -0.5
         
+        # Store rope dimensions
+        self.rope_dim = args.qk_rope_head_dim
+        
         # Apply extended context scaling if needed
         if args.max_seq_len > args.original_seq_len:
             self.scale *= args.mscale
@@ -120,7 +136,7 @@ class Attention(nn.Module):
         v = self.v_proj(x).view(B, T, 1, 256).expand(B, T, H, 256)  # [B, T, H, 256]
         
         # Apply rotary embeddings only to the query projection
-        q = self.rope(q, start_pos)
+        q = self.rope(q[..., :self.rope_dim*2], start_pos)  # Apply RoPE to first rope_dim*2 dims
         
         # Compute attention
         attn = torch.einsum("bthd,bshd->bhts", q, k) * self.scale
