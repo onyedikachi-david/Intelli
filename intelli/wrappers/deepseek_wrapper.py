@@ -198,109 +198,123 @@ class DeepSeekWrapper:
             temp_params = {k: getattr(self, k) for k in ['temperature', 'top_p', 'top_k', 'max_length', 'repetition_penalty']}
             self.update_params(**kwargs)
         
-        # Format as chat messages
-        messages = [
-            {"role": "user", "content": prompt}
-        ]
-        
-        # Get input tokens
-        input_ids = self.tokenizer.apply_chat_template(messages)
-        input_ids = torch.tensor(input_ids, dtype=torch.long, device=self.device).unsqueeze(0)
-        
-        # Track generated tokens for repetition penalty
-        generated = []
-        response_text = ""
-        consecutive_spaces = 0
-        
-        # Generate tokens
-        print(f"\nGeneration started (max_length={self.max_length})...")
-        for i in range(self.max_length):
-            # Get model output for current tokens
+        try:
+            # Format as chat messages
+            messages = [
+                {"role": "user", "content": prompt}
+            ]
+            
+            # Get input tokens
+            input_ids = self.tokenizer.apply_chat_template(messages)
+            input_ids = torch.tensor(input_ids, dtype=torch.long, device=self.device).unsqueeze(0)
+            
+            # Track generated tokens for repetition penalty
+            generated = []
+            response_text = ""
+            consecutive_spaces = 0
+            
+            # Generate tokens
+            print(f"\nGeneration started (max_length={self.max_length})...")
+            
+            # Initial forward pass to get past key/values
             with torch.no_grad():
                 outputs = self.model(input_ids)
-                next_token_logits = outputs[0, -1, :].float()
+                logits = outputs[0]  # [batch_size, seq_len, vocab_size]
                 
-                # Apply repetition penalty
-                if len(generated) > 0:
-                    for token in generated:
-                        next_token_logits[token] /= self.repetition_penalty
+                # Get last token logits
+                next_token_logits = logits[0, -1, :].float()
                 
-                # Apply temperature scaling
-                if self.temperature > 0:
-                    next_token_logits = next_token_logits / self.temperature
+                # Print initial logits stats for debugging
+                print(f"Initial logits - min: {next_token_logits.min():.2f}, max: {next_token_logits.max():.2f}, mean: {next_token_logits.mean():.2f}")
                 
-                # Apply top-k filtering
-                if self.top_k > 0:
-                    top_k = min(self.top_k, next_token_logits.size(-1))
-                    indices_to_remove = next_token_logits < torch.topk(next_token_logits, top_k)[0][..., -1, None]
-                    next_token_logits[indices_to_remove] = float('-inf')
-                
-                # Apply top-p (nucleus) filtering
-                if self.top_p < 1.0:
-                    sorted_logits, sorted_indices = torch.sort(next_token_logits, descending=True)
-                    cumulative_probs = torch.cumsum(torch.softmax(sorted_logits, dim=-1), dim=-1)
+                for i in range(self.max_length):
+                    # Apply repetition penalty
+                    if len(generated) > 0:
+                        for token in generated:
+                            next_token_logits[token] /= self.repetition_penalty
                     
-                    # Remove tokens with cumulative probability above the threshold
-                    sorted_indices_to_remove = cumulative_probs > self.top_p
-                    sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
-                    sorted_indices_to_remove[..., 0] = 0
+                    # Apply temperature scaling
+                    if self.temperature > 0:
+                        next_token_logits = next_token_logits / self.temperature
                     
-                    indices_to_remove = sorted_indices[sorted_indices_to_remove]
-                    next_token_logits[indices_to_remove] = float('-inf')
-                
-                # Handle numerical stability
-                max_val = next_token_logits.max()
-                if max_val > 0:
-                    next_token_logits = next_token_logits - max_val
-                
-                # Apply softmax
-                probs = torch.softmax(next_token_logits, dim=-1)
-                
-                # Sample next token
-                if torch.isnan(probs).any() or torch.isinf(probs).any() or (probs < 0).any():
-                    # Fallback to argmax if probabilities are invalid
-                    next_token = torch.argmax(next_token_logits).unsqueeze(0)
-                else:
-                    # Sample from the filtered distribution
-                    next_token = torch.multinomial(probs, num_samples=1)
-                
-                # Add the chosen token to the sequence
-                generated.append(next_token.item())
-                input_ids = torch.cat([input_ids, next_token.unsqueeze(0)], dim=1)
-                
-                # Decode the token and add to response
-                token_text = self.tokenizer.decode([next_token.item()], skip_special_tokens=True)
-                if token_text:
-                    response_text += token_text
-                    # Update consecutive spaces counter
-                    if token_text.isspace():
-                        consecutive_spaces += 1
+                    # Apply top-k filtering
+                    if self.top_k > 0:
+                        top_k = min(self.top_k, next_token_logits.size(-1))
+                        values, _ = torch.topk(next_token_logits, top_k)
+                        min_value = values[-1]
+                        next_token_logits[next_token_logits < min_value] = float('-inf')
+                    
+                    # Apply top-p (nucleus) filtering
+                    if self.top_p < 1.0:
+                        sorted_logits, sorted_indices = torch.sort(next_token_logits, descending=True)
+                        cumulative_probs = torch.cumsum(torch.softmax(sorted_logits, dim=-1), dim=-1)
+                        
+                        # Remove tokens with cumulative probability above the threshold
+                        sorted_indices_to_remove = cumulative_probs > self.top_p
+                        sorted_indices_to_remove[1:] = sorted_indices_to_remove[:-1].clone()
+                        sorted_indices_to_remove[0] = 0
+                        
+                        indices_to_remove = sorted_indices[sorted_indices_to_remove]
+                        next_token_logits[indices_to_remove] = float('-inf')
+                    
+                    # Apply softmax
+                    probs = torch.softmax(next_token_logits, dim=-1)
+                    
+                    # Sample next token
+                    if torch.isnan(probs).any() or torch.isinf(probs).any() or (probs < 0).any():
+                        print("\nWarning: Invalid probabilities detected, falling back to argmax")
+                        next_token = torch.argmax(next_token_logits).unsqueeze(0)
                     else:
-                        consecutive_spaces = 0
-                    # Print progress
-                    print(f"\rGenerated ({i+1} tokens): {response_text}", end="", flush=True)
-                
-                # Check for stop conditions
-                if next_token.item() in [self.tokenizer.eos_token_id, self.tokenizer.user_token_id]:
-                    print("\nGeneration complete: End token reached")
-                    break
-                elif consecutive_spaces >= 5:  # Reduced threshold for consecutive spaces
-                    print("\nGeneration complete: Multiple spaces detected")
-                    break
-                elif len(response_text) > 0 and not response_text[-1].strip():
-                    # Check if we've hit a natural stopping point (sentence end + space)
-                    last_char = response_text.rstrip()[-1] if response_text.rstrip() else ""
-                    if last_char in ".!?" and i > 20:
-                        print("\nGeneration complete: Natural end point reached")
+                        # Sample from the filtered distribution
+                        next_token = torch.multinomial(probs, num_samples=1)
+                    
+                    # Add the chosen token to the sequence
+                    generated.append(next_token.item())
+                    input_ids = torch.cat([input_ids, next_token.unsqueeze(0).unsqueeze(0)], dim=1)
+                    
+                    # Get next token's logits
+                    outputs = self.model(input_ids)
+                    next_token_logits = outputs[0][0, -1, :].float()
+                    
+                    # Decode the token and add to response
+                    token_text = self.tokenizer.decode([next_token.item()], skip_special_tokens=True)
+                    if token_text:
+                        response_text += token_text
+                        # Update consecutive spaces counter
+                        if token_text.isspace():
+                            consecutive_spaces += 1
+                        else:
+                            consecutive_spaces = 0
+                        # Print progress
+                        print(f"\rGenerated ({i+1} tokens): {response_text}", end="", flush=True)
+                    
+                    # Check for stop conditions
+                    if next_token.item() in [self.tokenizer.eos_token_id, self.tokenizer.user_token_id]:
+                        print("\nGeneration complete: End token reached")
                         break
-        
-        print("\n")  # New line after generation
-        
-        # Restore original parameters if they were temporarily overridden
-        if kwargs:
-            self.update_params(**temp_params)
-        
-        return response_text.strip()
+                    elif consecutive_spaces >= 5:  # Reduced threshold for consecutive spaces
+                        print("\nGeneration complete: Multiple spaces detected")
+                        break
+                    elif len(response_text) > 0 and not response_text[-1].strip():
+                        # Check if we've hit a natural stopping point (sentence end + space)
+                        last_char = response_text.rstrip()[-1] if response_text.rstrip() else ""
+                        if last_char in ".!?" and i > 20:
+                            print("\nGeneration complete: Natural end point reached")
+                            break
+            
+            print("\n")  # New line after generation
+            
+            # Restore original parameters if they were temporarily overridden
+            if kwargs:
+                self.update_params(**temp_params)
+            
+            return response_text.strip()
+            
+        except Exception as e:
+            print(f"\nError during generation: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return ""
     
     def __call__(self, prompt: str, **kwargs) -> str:
         """Alias for generate method."""
