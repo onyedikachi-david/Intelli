@@ -416,6 +416,17 @@ class ModelLoader:
         
         # Reshape and move to device
         try:
+            # Adjust shape based on actual size if needed
+            if actual_size != target_size:
+                if len(shape) == 2:
+                    # For 2D tensors, adjust the first dimension
+                    shape = (actual_size // shape[1], shape[1])
+                elif len(shape) == 1:
+                    # For 1D tensors, use the actual size
+                    shape = (actual_size,)
+                else:
+                    print(f"Warning: Using original shape for {name}")
+                    shape = original_shape
             tensor = tensor.reshape(shape)
         except ValueError as e:
             print(f"Error reshaping tensor {name}")
