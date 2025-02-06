@@ -149,44 +149,68 @@ class Attention(nn.Module):
         k_proj_bias = state_dict.pop(prefix + 'k_proj.bias', None)
         
         if k_proj_weight is not None:
-            # Handle model parallel sharding
-            mp_size = k_proj_weight.size(0) // self.lora_rank
-            k_proj_weight = k_proj_weight.view(mp_size, self.lora_rank, -1)
+            # Calculate model parallel size based on weight dimensions
+            total_elements = k_proj_weight.numel()
+            mp_size = total_elements // (self.lora_rank * self.hidden_size)
             
-            # Convert to LoRA format
+            # Reshape according to DeepSeek's MP pattern
+            k_proj_weight = k_proj_weight.view(
+                mp_size,                # model parallel splits
+                self.lora_rank // mp_size,  # 256/8=32 for each shard
+                self.hidden_size        # hidden_size (1536)
+            )
+            
+            # Convert to LoRA format with proper sharding
             for i in range(mp_size):
-                shard = k_proj_weight[i]
-                # Add proj_a weights
-                state_dict[f"{prefix}k_proj_a.weight.{i}"] = shard
+                # Add proj_a weights with correct shape [32, 1536]
+                state_dict[f"{prefix}k_proj_a.weight.{i}"] = k_proj_weight[i].contiguous()
                 
                 if k_proj_bias is not None:
-                    bias_shard = k_proj_bias[i * self.lora_rank:(i + 1) * self.lora_rank]
+                    # Split bias into shards of size [32]
+                    bias_shard = k_proj_bias[i * (self.lora_rank // mp_size):(i + 1) * (self.lora_rank // mp_size)]
                     state_dict[f"{prefix}k_proj_a.bias.{i}"] = bias_shard
             
-            # proj_b weights are shared across shards
-            state_dict[f"{prefix}k_proj_b.weight"] = torch.eye(self.hidden_size, self.lora_rank)
+            # proj_b weights are shared and transposed [1536, 32]
+            state_dict[f"{prefix}k_proj_b.weight"] = torch.eye(
+                self.hidden_size, 
+                self.lora_rank // mp_size,
+                device=k_proj_weight.device,
+                dtype=k_proj_weight.dtype
+            )
         
         # Handle value projection weights
         v_proj_weight = state_dict.pop(prefix + 'v_proj.weight', None)
         v_proj_bias = state_dict.pop(prefix + 'v_proj.bias', None)
         
         if v_proj_weight is not None:
-            # Handle model parallel sharding
-            mp_size = v_proj_weight.size(0) // self.lora_rank
-            v_proj_weight = v_proj_weight.view(mp_size, self.lora_rank, -1)
+            # Calculate model parallel size based on weight dimensions
+            total_elements = v_proj_weight.numel()
+            mp_size = total_elements // (self.lora_rank * self.hidden_size)
             
-            # Convert to LoRA format
+            # Reshape according to DeepSeek's MP pattern
+            v_proj_weight = v_proj_weight.view(
+                mp_size,                # model parallel splits
+                self.lora_rank // mp_size,  # 256/8=32 for each shard
+                self.hidden_size        # hidden_size (1536)
+            )
+            
+            # Convert to LoRA format with proper sharding
             for i in range(mp_size):
-                shard = v_proj_weight[i]
-                # Add proj_a weights
-                state_dict[f"{prefix}v_proj_a.weight.{i}"] = shard
+                # Add proj_a weights with correct shape [32, 1536]
+                state_dict[f"{prefix}v_proj_a.weight.{i}"] = v_proj_weight[i].contiguous()
                 
                 if v_proj_bias is not None:
-                    bias_shard = v_proj_bias[i * self.lora_rank:(i + 1) * self.lora_rank]
+                    # Split bias into shards of size [32]
+                    bias_shard = v_proj_bias[i * (self.lora_rank // mp_size):(i + 1) * (self.lora_rank // mp_size)]
                     state_dict[f"{prefix}v_proj_a.bias.{i}"] = bias_shard
             
-            # proj_b weights are shared across shards
-            state_dict[f"{prefix}v_proj_b.weight"] = torch.eye(self.hidden_size, self.lora_rank)
+            # proj_b weights are shared and transposed [1536, 32]
+            state_dict[f"{prefix}v_proj_b.weight"] = torch.eye(
+                self.hidden_size,
+                self.lora_rank // mp_size,
+                device=v_proj_weight.device,
+                dtype=v_proj_weight.dtype
+            )
         
         # Let parent class handle the rest
         super()._load_from_state_dict(state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs)
