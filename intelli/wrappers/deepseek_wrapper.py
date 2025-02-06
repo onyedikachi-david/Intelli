@@ -91,12 +91,22 @@ class DeepSeekWrapper:
         self.config = model_data["config"]
         self.tokenizer = model_data["tokenizer"]
         
+        # Get vocabulary size from config or tokenizer
+        if "vocab_size" in self.config:
+            vocab_size = self.config["vocab_size"]
+        else:
+            vocab_size = self.tokenizer.sp_model.get_piece_size()
+            
+        print(f"\nVocabulary information:")
+        print(f"Config vocab size: {self.config.get('vocab_size', 'Not specified')}")
+        print(f"Tokenizer vocab size: {vocab_size}")
+        
         # Create model args from config
         model_args = {
             'dim': self.config["hidden_size"],
             'n_layers': self.config["num_hidden_layers"],
             'n_heads': self.config["num_attention_heads"],
-            'vocab_size': self.tokenizer.sp_model.get_piece_size(),
+            'vocab_size': vocab_size,
             'max_seq_len': self.config["max_sequence_length"],
             'max_batch_size': 32,
             'inter_dim': self.config["intermediate_size"],
@@ -179,10 +189,18 @@ class DeepSeekWrapper:
                     state_dict[bias_key] = bias[i].contiguous()
             # Handle embedding and output layers
             elif key in ['embed_tokens.weight', 'lm_head.weight']:
-                # Resize embedding/output layers to match tokenizer vocab size
-                vocab_size = self.tokenizer.sp_model.get_piece_size()
-                if tensor.size(0) > vocab_size:
-                    tensor = tensor[:vocab_size]
+                # Keep original vocab size for these layers
+                if tensor.size(0) != vocab_size:
+                    if tensor.size(0) > vocab_size:
+                        # Truncate if larger
+                        tensor = tensor[:vocab_size]
+                    else:
+                        # Pad if smaller
+                        pad_size = vocab_size - tensor.size(0)
+                        tensor = torch.cat([
+                            tensor,
+                            torch.zeros(pad_size, tensor.size(1), dtype=tensor.dtype)
+                        ])
                 # Normalize embedding weights
                 if tensor.dim() > 0:
                     tensor = tensor / max(tensor.norm(dim=-1).max().item(), 1e-3)
@@ -259,16 +277,7 @@ class DeepSeekWrapper:
                 setattr(self, k, v)
                 
     def generate(self, prompt: str, **kwargs) -> str:
-        """
-        Generate text from prompt.
-        
-        Args:
-            prompt: Input text prompt
-            **kwargs: Optional generation parameters to override defaults
-            
-        Returns:
-            Generated text response
-        """
+        """Generate text from prompt."""
         # Update parameters if provided
         if kwargs:
             temp_params = {k: getattr(self, k) for k in ['temperature', 'top_p', 'top_k', 'max_length', 'repetition_penalty']}
@@ -291,7 +300,13 @@ class DeepSeekWrapper:
             
             # Get vocabulary sizes
             tokenizer_vocab_size = self.tokenizer.sp_model.get_piece_size()
+            model_vocab_size = self.model.args.vocab_size
             print(f"Tokenizer vocab size: {tokenizer_vocab_size}")
+            print(f"Model vocab size: {model_vocab_size}")
+            
+            # Use minimum of tokenizer and model vocab size
+            vocab_size = min(tokenizer_vocab_size, model_vocab_size)
+            print(f"Using vocab size: {vocab_size}")
             
             # Get special token IDs
             special_tokens = {
@@ -330,9 +345,9 @@ class DeepSeekWrapper:
                 
                 # Get last token logits based on shape
                 if len(logits.shape) == 3:
-                    next_token_logits = logits[0, -1].clone()
+                    next_token_logits = logits[0, -1, :vocab_size].clone()  # Only keep valid vocab
                 elif len(logits.shape) == 2:
-                    next_token_logits = logits[-1].clone()
+                    next_token_logits = logits[-1, :vocab_size].clone()  # Only keep valid vocab
                 else:
                     raise ValueError(f"Unexpected logits shape: {logits.shape}")
                 
@@ -380,10 +395,6 @@ class DeepSeekWrapper:
                 print(f"Max probability: {probs.max().item():.6f}")
                 print(f"Has valid distribution: {(probs >= 0).all().item() and (probs <= 1).all().item()}")
                 
-                # Only keep probabilities for valid tokens
-                probs = probs[:tokenizer_vocab_size]
-                probs = probs / probs.sum()  # Renormalize
-                
                 top_probs, top_indices = probs.topk(5)
                 print(f"Top 5 probabilities: {top_probs.tolist()}")
                 print(f"Top 5 token IDs: {top_indices.tolist()}")
@@ -393,7 +404,7 @@ class DeepSeekWrapper:
                     # Apply repetition penalty
                     if len(generated) > 0:
                         for token in generated:
-                            if token < tokenizer_vocab_size:
+                            if token < vocab_size:
                                 if next_token_logits[token] > 0:
                                     next_token_logits[token] /= self.repetition_penalty
                                 else:
@@ -411,7 +422,7 @@ class DeepSeekWrapper:
                     
                     # Apply top-k filtering
                     if self.top_k > 0:
-                        values, _ = torch.topk(scaled_logits, min(self.top_k, tokenizer_vocab_size))
+                        values, _ = torch.topk(scaled_logits, min(self.top_k, vocab_size))
                         min_value = values[-1]
                         scaled_logits = torch.where(
                             scaled_logits < min_value,
@@ -444,10 +455,6 @@ class DeepSeekWrapper:
                     )
                     probs = probs / probs.sum()  # Renormalize
                     
-                    # Only keep probabilities for valid tokens
-                    probs = probs[:tokenizer_vocab_size]
-                    probs = probs / probs.sum()  # Renormalize
-                    
                     # Sample next token
                     try:
                         next_token = torch.multinomial(probs, num_samples=1)
@@ -460,7 +467,7 @@ class DeepSeekWrapper:
                     token_id = next_token.item()
                     
                     # Validate token ID
-                    if token_id >= tokenizer_vocab_size:
+                    if token_id >= vocab_size:
                         print(f"\nWarning: Token ID {token_id} out of range, using UNK token")
                         token_id = self.tokenizer.sp_model.unk_id()
                         next_token = torch.tensor([token_id], device=self.device)
@@ -502,9 +509,9 @@ class DeepSeekWrapper:
                             logits = outputs
                         
                         if len(logits.shape) == 3:
-                            next_token_logits = logits[0, -1].clone()
+                            next_token_logits = logits[0, -1, :vocab_size].clone()  # Only keep valid vocab
                         elif len(logits.shape) == 2:
-                            next_token_logits = logits[-1].clone()
+                            next_token_logits = logits[-1, :vocab_size].clone()  # Only keep valid vocab
                         
                         # Keep logits in model dtype and handle NaN/Inf
                         next_token_logits = next_token_logits.to(self.dtype)
