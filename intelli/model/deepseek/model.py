@@ -56,56 +56,36 @@ class RMSNorm(nn.Module):
 
 class RotaryEmbedding(nn.Module):
     """Rotary positional embeddings."""
-    def __init__(self, dim: int, max_seq_len: int = 4096):
+    def __init__(self, args: ModelArgs):
         super().__init__()
+        dim = args.qk_rope_head_dim
+        base = args.rope_theta
+        
+        # Compute position embeddings but don't register as buffers
+        self.inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2).float() / dim))
+        
+        # Apply scaling for extended context
+        if args.max_seq_len > args.original_seq_len:
+            scale = math.log(args.rope_factor) / 2.0
+            self.inv_freq = self.inv_freq * args.rope_factor ** (scale / dim)
+        
+        # Store dimensions for use in forward pass
         self.dim = dim
-        self.max_seq_len = max_seq_len
-        
-        # Initialize buffers with persistent=False
-        self.register_buffer("cos", None, persistent=False)
-        self.register_buffer("sin", None, persistent=False)
-        
-        # Precompute during initialization
-        self._precompute_rotary()
 
-    def _precompute_rotary(self):
-        inv_freq = 1.0 / (10000 ** (torch.arange(0, self.dim//2, 2).float() / (self.dim//2)))
-        t = torch.arange(self.max_seq_len, dtype=inv_freq.dtype)
-        freqs = torch.outer(t, inv_freq)
+    def forward(self, x: torch.Tensor, start_pos: int = 0) -> torch.Tensor:
+        seq_len = x.size(1)
         
-        # Store as buffers but not in state dict
-        with torch.no_grad():
-            self.cos = freqs.cos()
-            self.sin = freqs.sin()
-
-    def forward(self, x: torch.Tensor, start_pos: int) -> torch.Tensor:
-        # Move inv_freq to correct device
-        self.cos = self.cos.to(x.device)
-        self.sin = self.sin.to(x.device)
+        # Get precomputed cos/sin values
+        cos = self.cos[start_pos : start_pos + seq_len]  # [seq_len, dim//2]
+        sin = self.sin[start_pos : start_pos + seq_len]  # [seq_len, dim//2]
         
-        # Get sequence length and compute position embeddings
-        seq_len = x.shape[1]
-        t = torch.arange(start_pos, start_pos + seq_len, device=x.device)
-        freqs = torch.einsum("i,j->ij", t, self.cos)  # [seq_len, dim/2]
+        # Reshape for broadcasting with attention heads
+        cos = cos.view(1, seq_len, 1, -1)  # [1, seq_len, 1, dim//2]
+        sin = sin.view(1, seq_len, 1, -1)  # [1, seq_len, 1, dim//2]
         
-        # Compute cos and sin
-        cos = freqs
-        sin = torch.einsum("i,j->ij", t, self.sin)  # [seq_len, dim/2]
-        
-        # Reshape for broadcasting
-        cos = cos.view(1, seq_len, 1, -1)  # [1, seq_len, 1, dim/2]
-        sin = sin.view(1, seq_len, 1, -1)  # [1, seq_len, 1, dim/2]
-        
-        # Split input into half for rotation
-        x_half = x.shape[-1] // 2
-        x1 = x[..., :x_half]
-        x2 = x[..., x_half:]
-        
-        # Apply rotation using the RoPE formulation
-        rotated = torch.cat([
-            x1 * cos - x2 * sin,
-            x2 * cos + x1 * sin,
-        ], dim=-1)
+        # Split and rotate features
+        x1, x2 = x.chunk(2, dim=-1)
+        rotated = torch.cat((x1 * cos - x2 * sin, x2 * cos + x1 * sin), dim=-1)
         
         return rotated
 
@@ -125,7 +105,7 @@ class Attention(nn.Module):
         self.v_proj = nn.Linear(args.dim, 256, bias=True)
         self.o_proj = nn.Linear(args.dim, args.dim, bias=False)
         
-        self.rope = RotaryEmbedding(args.qk_rope_head_dim, args.max_seq_len)
+        self.rope = RotaryEmbedding(args)
         self.scale = self.head_dim ** -0.5
         
         # Store rope dimensions
