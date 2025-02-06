@@ -213,9 +213,25 @@ class DeepSeekWrapper:
             response_text = ""
             consecutive_spaces = 0
             
-            # Get vocabulary size from config
-            vocab_size = self.config["vocab_size"]
-            print(f"Vocabulary size: {vocab_size}")
+            # Get vocabulary sizes
+            config_vocab_size = self.config["vocab_size"]
+            tokenizer_vocab_size = self.tokenizer.sp_model.get_piece_size()
+            vocab_size = min(config_vocab_size, tokenizer_vocab_size)
+            print(f"Config vocab size: {config_vocab_size}")
+            print(f"Tokenizer vocab size: {tokenizer_vocab_size}")
+            print(f"Using vocab size: {vocab_size}")
+            
+            # Get special token IDs
+            special_tokens = {
+                self.tokenizer.pad_token_id,
+                self.tokenizer.bos_token_id,
+                self.tokenizer.eos_token_id,
+                self.tokenizer.user_token_id,
+                self.tokenizer.assistant_token_id,
+                self.tokenizer.system_token_id,
+                self.tokenizer.sp_model.unk_id()
+            }
+            print(f"Special token IDs: {special_tokens}")
             
             # Generate tokens
             print(f"\nGeneration started (max_length={self.max_length})...")
@@ -331,13 +347,24 @@ class DeepSeekWrapper:
                         # Sample from the filtered distribution
                         next_token = torch.multinomial(probs, num_samples=1)
                     
-                    # Ensure token ID is within vocabulary range
-                    if next_token.item() >= vocab_size:
-                        print(f"\nWarning: Token ID {next_token.item()} out of range, using UNK token")
-                        next_token = torch.tensor([self.tokenizer.sp_model.unk_id()], device=self.device)
+                    # Validate token ID
+                    token_id = next_token.item()
+                    if token_id >= vocab_size or token_id < 0:
+                        print(f"\nWarning: Token ID {token_id} out of range, using UNK token")
+                        token_id = self.tokenizer.sp_model.unk_id()
+                        next_token = torch.tensor([token_id], device=self.device)
+                    
+                    # Try decoding the token to validate it
+                    try:
+                        token_text = self.tokenizer.decode([token_id], skip_special_tokens=True)
+                    except Exception as e:
+                        print(f"\nWarning: Failed to decode token {token_id}, using UNK token")
+                        token_id = self.tokenizer.sp_model.unk_id()
+                        next_token = torch.tensor([token_id], device=self.device)
+                        token_text = self.tokenizer.decode([token_id], skip_special_tokens=True)
                     
                     # Add the chosen token to the sequence
-                    generated.append(next_token.item())
+                    generated.append(token_id)
                     
                     # Reshape next_token to match input_ids dimensions [batch_size, seq_len]
                     next_token = next_token.unsqueeze(0)  # Add batch dimension
@@ -366,8 +393,6 @@ class DeepSeekWrapper:
                         next_token_logits
                     )
                     
-                    # Decode the token and add to response
-                    token_text = self.tokenizer.decode([next_token.item()], skip_special_tokens=True)
                     if token_text:
                         response_text += token_text
                         # Update consecutive spaces counter
@@ -379,7 +404,7 @@ class DeepSeekWrapper:
                         print(f"\rGenerated ({i+1} tokens): {response_text}", end="", flush=True)
                     
                     # Check for stop conditions
-                    if next_token.item() in [self.tokenizer.eos_token_id, self.tokenizer.user_token_id]:
+                    if token_id in [self.tokenizer.eos_token_id, self.tokenizer.user_token_id]:
                         print("\nGeneration complete: End token reached")
                         break
                     elif consecutive_spaces >= 5:  # Reduced threshold for consecutive spaces
