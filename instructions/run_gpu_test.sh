@@ -97,50 +97,50 @@ done
 
 # Print PyTorch version and CUDA info
 echo -e "\nPyTorch and CUDA Information:"
-python3 -c "
+python3 -c '
 import torch
 import os
 import sys
 
 def print_cuda_info():
-    print(f'PyTorch version: {torch.__version__}')
-    print(f'CUDA available: {torch.cuda.is_available()}')
-    print(f'CUDA version: {torch.version.cuda if torch.cuda.is_available() else \"N/A\"}')
+    print(f"PyTorch version: {torch.__version__}")
+    print(f"CUDA available: {torch.cuda.is_available()}")
+    print(f"CUDA version: {torch.version.cuda if torch.cuda.is_available() else "N/A"}")
     
     if torch.cuda.is_available():
-        print(f'Using device: {torch.cuda.get_device_name(0)}')
-        print(f'\nCUDA device count: {torch.cuda.device_count()}')
-        print(f'Current CUDA device: {torch.cuda.current_device()}')
-        print(f'Device capability: {torch.cuda.get_device_capability()}')
-        print(f'\nCUDA device properties:')
+        print(f"Using device: {torch.cuda.get_device_name(0)}")
+        print(f"\nCUDA device count: {torch.cuda.device_count()}")
+        print(f"Current CUDA device: {torch.cuda.current_device()}")
+        print(f"Device capability: {torch.cuda.get_device_capability()}")
+        print(f"\nCUDA device properties:")
         props = torch.cuda.get_device_properties(0)
-        print(f'  Name: {props.name}')
-        print(f'  Total memory: {props.total_memory / 1024**3:.1f} GB')
-        print(f'  Multi processor count: {props.multi_processor_count}')
-        print(f'  Max threads per block: {props.max_threads_per_block}')
-        print(f'  Max threads per MP: {props.max_threads_per_multi_processor}')
+        print(f"  Name: {props.name}")
+        print(f"  Total memory: {props.total_memory / 1024**3:.1f} GB")
+        print(f"  Multi processor count: {props.multi_processor_count}")
+        print(f"  Max threads per block: {props.max_threads_per_block}")
+        print(f"  Max threads per MP: {props.max_threads_per_multi_processor}")
     else:
-        print('Using device: CPU')
+        print("Using device: CPU")
         
-    print(f'\nEnvironment variables:')
-    print(f'CUDA_HOME: {os.environ.get(\"CUDA_HOME\", \"Not set\")}')
-    print(f'CUDA_VISIBLE_DEVICES: {os.environ.get(\"CUDA_VISIBLE_DEVICES\", \"Not set\")}')
-    print(f'LD_LIBRARY_PATH: {os.environ.get(\"LD_LIBRARY_PATH\", \"Not set\")}')
+    print(f"\nEnvironment variables:")
+    print(f"CUDA_HOME: {os.environ.get("CUDA_HOME", "Not set")}")
+    print(f"CUDA_VISIBLE_DEVICES: {os.environ.get("CUDA_VISIBLE_DEVICES", "Not set")}")
+    print(f"LD_LIBRARY_PATH: {os.environ.get("LD_LIBRARY_PATH", "Not set")}")
     
     if torch.cuda.is_available():
-        print(f'\nGPU Memory Info:')
-        print(f'Total: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB')
-        print(f'Allocated: {torch.cuda.memory_allocated() / 1024**3:.1f} GB')
-        print(f'Cached: {torch.cuda.memory_reserved() / 1024**3:.1f} GB')
+        print(f"\nGPU Memory Info:")
+        print(f"Total: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
+        print(f"Allocated: {torch.cuda.memory_allocated() / 1024**3:.1f} GB")
+        print(f"Cached: {torch.cuda.memory_reserved() / 1024**3:.1f} GB")
 
 try:
     print_cuda_info()
 except Exception as e:
-    print(f'Error getting CUDA info: {str(e)}')
+    print(f"Error getting CUDA info: {str(e)}")
     import traceback
     traceback.print_exc()
     sys.exit(1)
-" || echo "Failed to get PyTorch info"
+' || echo "Failed to get PyTorch info"
 
 # Run GPU test
 echo -e "\nRunning GPU inference test..."

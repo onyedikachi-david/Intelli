@@ -275,61 +275,9 @@ class ModelLoader:
         else:
             return 4
     
-    def _load_tensor(self, name: str, device: str = "cpu") -> torch.Tensor:
-        """Load a tensor from the model weights."""
+    def _load_tensor(self, name: str, device: str = "cuda") -> torch.Tensor:
+        """Load a tensor from memory mapping."""
         info = self.tensor_info[name]
-        dtype = self._get_dtype(info.dtype)
-        
-        # Get the data
-        data = self._get_tensor_data(info)
-        
-        try:
-            # Try to reshape the data
-            tensor = torch.from_numpy(data).to(dtype=dtype, device=device)
-            if info.shape is not None:
-                try:
-                    tensor = tensor.reshape(info.shape)
-                except ValueError as e:
-                    # If reshape fails, try to infer the correct shape
-                    total_elements = tensor.numel()
-                    if name.endswith('.weight') and len(info.shape) == 2:
-                        # For weight matrices, try to maintain the output dimension
-                        out_dim = info.shape[0]
-                        if total_elements % out_dim == 0:
-                            new_shape = (out_dim, total_elements // out_dim)
-                            print(f"Adjusting shape for {name} from {info.shape} to {new_shape}")
-                            tensor = tensor.reshape(new_shape)
-                        else:
-                            raise ValueError(f"Cannot reshape tensor {name} with {total_elements} elements into shape {info.shape}")
-                    else:
-                        raise ValueError(f"Cannot reshape tensor {name}: {str(e)}")
-            
-            # Handle quantization if needed
-            if info.quantize:
-                tensor = self._dequantize_tensor(tensor, info)
-            
-            return tensor
-            
-        except Exception as e:
-            print(f"Error loading tensor {name}: {str(e)}")
-            print(f"Tensor info: dtype={dtype}, shape={info.shape}, data size={len(data)}")
-            raise
-    
-    def _quantize_tensor(self, tensor: torch.Tensor) -> torch.Tensor:
-        """Quantize a tensor using block-wise quantization."""
-        if tensor.element_size() > 2:  # Only quantize fp32/fp16 tensors
-            tensor, scale = act_quant(tensor, self.block_size)
-            tensor.scale = scale  # Store scale for dequantization
-        return tensor
-    
-    def _dequantize_tensor(self, tensor: torch.Tensor, info: TensorInfo) -> torch.Tensor:
-        """Dequantize a tensor using the stored scale."""
-        if info.dtype not in [TensorType.Q8_0, TensorType.Q4_0, TensorType.Q4_1]:
-            tensor = weight_dequant(tensor, info.scale)
-        return tensor
-    
-    def _get_tensor_data(self, info: TensorInfo) -> np.ndarray:
-        """Get tensor data from memory mapping."""
         shard = list(self.mappings.values())[info.file_idx]
         
         # Read tensor data from memory mapping
@@ -339,20 +287,21 @@ class ModelLoader:
             dtype=np.float32 if info.dtype == TensorType.F32 else np.float16
         ).reshape(info.shape)
         
-        return tensor_data
+        # Convert to torch tensor
+        tensor = torch.from_numpy(tensor_data).to(device)
+        
+        # Apply quantization if enabled
+        if self.quantize and info.dtype not in [TensorType.Q8_0, TensorType.Q4_0, TensorType.Q4_1]:
+            tensor = self._quantize_tensor(tensor)
+        
+        return tensor
     
-    def _get_dtype(self, dtype: TensorType) -> torch.dtype:
-        """Map TensorType to PyTorch dtype."""
-        if dtype == TensorType.F32:
-            return torch.float32
-        elif dtype == TensorType.F16:
-            return torch.float16
-        elif dtype == TensorType.Q8_0:
-            return torch.int8
-        elif dtype == TensorType.Q4_0:
-            return torch.quint4x2
-        else:
-            return torch.float32
+    def _quantize_tensor(self, tensor: torch.Tensor) -> torch.Tensor:
+        """Quantize a tensor using block-wise quantization."""
+        if tensor.element_size() > 2:  # Only quantize fp32/fp16 tensors
+            tensor, scale = act_quant(tensor, self.block_size)
+            tensor.scale = scale  # Store scale for dequantization
+        return tensor
     
     def load_model(self, model_path: str, device: str = "cuda",
                   quantize: bool = False, dtype: Optional[torch.dtype] = None,
