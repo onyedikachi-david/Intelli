@@ -216,8 +216,8 @@ class DeepSeekWrapper:
             # Get vocabulary sizes
             config_vocab_size = self.config["vocab_size"]
             tokenizer_vocab_size = self.tokenizer.sp_model.get_piece_size()
-            # Use config vocab size since model was trained with this vocabulary
-            vocab_size = config_vocab_size
+            # Use tokenizer vocab size since that's what we can actually decode
+            vocab_size = tokenizer_vocab_size
             print(f"Config vocab size: {config_vocab_size}")
             print(f"Tokenizer vocab size: {tokenizer_vocab_size}")
             print(f"Using vocab size: {vocab_size}")
@@ -259,9 +259,9 @@ class DeepSeekWrapper:
                 
                 # Get last token logits based on shape
                 if len(logits.shape) == 3:
-                    next_token_logits = logits[0, -1].clone()  # Don't limit vocab size here
+                    next_token_logits = logits[0, -1, :vocab_size].clone()  # Limit to tokenizer vocab size
                 elif len(logits.shape) == 2:
-                    next_token_logits = logits[-1].clone()  # Don't limit vocab size here
+                    next_token_logits = logits[-1, :vocab_size].clone()  # Limit to tokenizer vocab size
                 else:
                     raise ValueError(f"Unexpected logits shape: {logits.shape}")
                 
@@ -338,6 +338,8 @@ class DeepSeekWrapper:
                         print(f"Probability sum: {probs.sum().item():.6f}")
                         print(f"Max probability: {probs.max().item():.6f}")
                         print(f"Has valid distribution: {(probs >= 0).all().item() and (probs <= 1).all().item()}")
+                        print(f"Top 5 probabilities: {probs.topk(5)[0].tolist()}")
+                        print(f"Top 5 token IDs: {probs.topk(5)[1].tolist()}")
                     
                     # Ensure valid probabilities
                     if torch.isnan(probs).any() or (probs.sum() - 1.0).abs() > 1e-3:
@@ -358,6 +360,11 @@ class DeepSeekWrapper:
                     # Try decoding the token to validate it
                     try:
                         token_text = self.tokenizer.decode([token_id], skip_special_tokens=True)
+                        if not token_text:  # If empty string returned
+                            print(f"\nWarning: Empty token text for ID {token_id}, using UNK token")
+                            token_id = self.tokenizer.sp_model.unk_id()
+                            next_token = torch.tensor([token_id], device=self.device)
+                            token_text = self.tokenizer.decode([token_id], skip_special_tokens=True)
                     except Exception as e:
                         print(f"\nWarning: Failed to decode token {token_id}, using UNK token")
                         token_id = self.tokenizer.sp_model.unk_id()
@@ -383,9 +390,9 @@ class DeepSeekWrapper:
                     
                     # Get next token logits based on shape
                     if len(logits.shape) == 3:
-                        next_token_logits = logits[0, -1].clone()  # Don't limit vocab size here
+                        next_token_logits = logits[0, -1, :vocab_size].clone()  # Limit to tokenizer vocab size
                     elif len(logits.shape) == 2:
-                        next_token_logits = logits[-1].clone()  # Don't limit vocab size here
+                        next_token_logits = logits[-1, :vocab_size].clone()  # Limit to tokenizer vocab size
                     
                     # Replace NaN/Inf values
                     next_token_logits = torch.where(
