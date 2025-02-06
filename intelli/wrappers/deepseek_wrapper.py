@@ -71,6 +71,9 @@ class DeepSeekWrapper:
         
     def _load_model(self):
         """Load model and tokenizer with optimizations."""
+        # Enable anomaly detection
+        torch.autograd.set_detect_anomaly(True)
+        
         loader = ModelLoader()
         
         # Download model files if needed
@@ -118,8 +121,19 @@ class DeepSeekWrapper:
             if key.startswith("model."):
                 key = key[6:]  # Remove "model." prefix
             
-            # Convert tensor to target dtype
+            # Convert tensor to target dtype and normalize if needed
             tensor = tensor.to(self.dtype)
+            if tensor.dim() > 0:  # Skip scalars
+                if torch.isnan(tensor).any() or torch.isinf(tensor).any():
+                    # Replace NaN/Inf with zeros
+                    tensor = torch.where(
+                        torch.isnan(tensor) | torch.isinf(tensor),
+                        torch.zeros_like(tensor),
+                        tensor
+                    )
+                # Normalize large weights
+                if tensor.abs().max() > 100:
+                    tensor = tensor * (100 / tensor.abs().max())
             
             # Handle key/value projection weights
             if 'k_proj.weight' in key or 'v_proj.weight' in key:
@@ -145,7 +159,8 @@ class DeepSeekWrapper:
                 state_dict[proj_b_key] = torch.eye(
                     in_dim,
                     shard_size,
-                    dtype=self.dtype
+                    dtype=self.dtype,
+                    device="cpu"
                 )
             # Handle key/value projection biases
             elif 'k_proj.bias' in key or 'v_proj.bias' in key:
@@ -168,6 +183,9 @@ class DeepSeekWrapper:
                 vocab_size = self.tokenizer.sp_model.get_piece_size()
                 if tensor.size(0) > vocab_size:
                     tensor = tensor[:vocab_size]
+                # Normalize embedding weights
+                if tensor.dim() > 0:
+                    tensor = tensor / max(tensor.norm(dim=-1).max().item(), 1e-3)
                 state_dict[key] = tensor
             else:
                 state_dict[key] = tensor
@@ -206,6 +224,21 @@ class DeepSeekWrapper:
                 print(f"Output has NaN: {torch.isnan(test_output).any().item()}")
                 print(f"Output has Inf: {torch.isinf(test_output).any().item()}")
                 print(f"Output stats - min: {test_output.min().item():.2f}, max: {test_output.max().item():.2f}, mean: {test_output.mean().item():.2f}")
+                
+                # Additional checks for numerical stability
+                if torch.isnan(test_output).any() or torch.isinf(test_output).any():
+                    print("\nWarning: Found NaN/Inf in test output")
+                    print("Layer-wise parameter stats:")
+                    for name, param in self.model.named_parameters():
+                        if param.dim() > 0:  # Skip scalars
+                            print(f"{name}:")
+                            print(f"  min: {param.min().item():.2f}")
+                            print(f"  max: {param.max().item():.2f}")
+                            print(f"  mean: {param.mean().item():.2f}")
+                            print(f"  std: {param.std().item():.2f}")
+                            print(f"  has NaN: {torch.isnan(param).any().item()}")
+                            print(f"  has Inf: {torch.isinf(param).any().item()}")
+                
             except Exception as e:
                 print(f"Test forward pass failed: {str(e)}")
                 raise
@@ -303,31 +336,36 @@ class DeepSeekWrapper:
                 else:
                     raise ValueError(f"Unexpected logits shape: {logits.shape}")
                 
-                # Keep logits in model dtype
+                # Keep logits in model dtype and handle NaN/Inf
                 next_token_logits = next_token_logits.to(self.dtype)
-                
-                # Print raw logits stats
-                print(f"Raw logits - min: {next_token_logits.min().item():.2f}, max: {next_token_logits.max().item():.2f}, mean: {next_token_logits.mean().item():.2f}")
-                
-                # Handle NaN/Inf values before softmax
                 next_token_logits = torch.where(
                     torch.isnan(next_token_logits) | torch.isinf(next_token_logits),
                     torch.zeros_like(next_token_logits),
                     next_token_logits
                 )
                 
+                # Clip extreme values
+                max_value = 100
+                next_token_logits = torch.clamp(next_token_logits, min=-max_value, max=max_value)
+                
+                # Print raw logits stats
+                print(f"Raw logits - min: {next_token_logits.min().item():.2f}, max: {next_token_logits.max().item():.2f}, mean: {next_token_logits.mean().item():.2f}")
+                
                 # Normalize logits to prevent overflow
                 next_token_logits = next_token_logits - next_token_logits.max()
                 
                 # Add small epsilon to avoid numerical instability
-                next_token_logits = next_token_logits + torch.finfo(self.dtype).tiny
+                eps = torch.finfo(self.dtype).tiny
+                next_token_logits = next_token_logits + eps
                 
                 # Apply temperature scaling first
                 if self.temperature > 0:
-                    next_token_logits = next_token_logits / max(self.temperature, torch.finfo(self.dtype).tiny)
+                    next_token_logits = next_token_logits / max(self.temperature, eps)
                 
-                # Apply softmax to get probabilities
-                probs = torch.softmax(next_token_logits, dim=-1)
+                # Apply softmax with better numerical stability
+                max_logits = next_token_logits.max()
+                exp_logits = torch.exp(next_token_logits - max_logits)
+                probs = exp_logits / exp_logits.sum()
                 
                 # Ensure valid probability distribution
                 probs = torch.where(
@@ -341,6 +379,10 @@ class DeepSeekWrapper:
                 print(f"Probability sum: {probs.sum().item():.6f}")
                 print(f"Max probability: {probs.max().item():.6f}")
                 print(f"Has valid distribution: {(probs >= 0).all().item() and (probs <= 1).all().item()}")
+                
+                # Only keep probabilities for valid tokens
+                probs = probs[:tokenizer_vocab_size]
+                probs = probs / probs.sum()  # Renormalize
                 
                 top_probs, top_indices = probs.topk(5)
                 print(f"Top 5 probabilities: {top_probs.tolist()}")
@@ -359,11 +401,11 @@ class DeepSeekWrapper:
                     
                     # Normalize logits again after repetition penalty
                     next_token_logits = next_token_logits - next_token_logits.max()
-                    next_token_logits = next_token_logits + torch.finfo(self.dtype).tiny
+                    next_token_logits = next_token_logits + eps
                     
                     # Apply temperature scaling
                     if self.temperature > 0:
-                        scaled_logits = next_token_logits / max(self.temperature, torch.finfo(self.dtype).tiny)
+                        scaled_logits = next_token_logits / max(self.temperature, eps)
                     else:
                         scaled_logits = next_token_logits
                     
@@ -389,8 +431,10 @@ class DeepSeekWrapper:
                         indices_to_remove = sorted_indices[sorted_indices_to_remove]
                         scaled_logits[indices_to_remove] = float('-inf')
                     
-                    # Get probabilities
-                    probs = torch.softmax(scaled_logits, dim=-1)
+                    # Get probabilities with better numerical stability
+                    max_logits = scaled_logits.max()
+                    exp_logits = torch.exp(scaled_logits - max_logits)
+                    probs = exp_logits / exp_logits.sum()
                     
                     # Ensure valid probability distribution
                     probs = torch.where(
@@ -398,6 +442,10 @@ class DeepSeekWrapper:
                         torch.ones_like(probs) / probs.size(-1),
                         probs
                     )
+                    probs = probs / probs.sum()  # Renormalize
+                    
+                    # Only keep probabilities for valid tokens
+                    probs = probs[:tokenizer_vocab_size]
                     probs = probs / probs.sum()  # Renormalize
                     
                     # Sample next token
@@ -458,18 +506,20 @@ class DeepSeekWrapper:
                         elif len(logits.shape) == 2:
                             next_token_logits = logits[-1].clone()
                         
-                        # Keep logits in model dtype
+                        # Keep logits in model dtype and handle NaN/Inf
                         next_token_logits = next_token_logits.to(self.dtype)
-                        
-                        # Handle NaN/Inf values
                         next_token_logits = torch.where(
                             torch.isnan(next_token_logits) | torch.isinf(next_token_logits),
                             torch.zeros_like(next_token_logits),
                             next_token_logits
                         )
+                        
+                        # Clip extreme values
+                        next_token_logits = torch.clamp(next_token_logits, min=-max_value, max=max_value)
+                        
                         # Normalize logits
                         next_token_logits = next_token_logits - next_token_logits.max()
-                        next_token_logits = next_token_logits + torch.finfo(self.dtype).tiny
+                        next_token_logits = next_token_logits + eps
             
             print("\n")
             
