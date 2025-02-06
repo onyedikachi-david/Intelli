@@ -237,9 +237,6 @@ class DeepSeekWrapper:
                 else:
                     raise ValueError(f"Unexpected logits shape: {logits.shape}")
                 
-                # Handle numerical stability
-                next_token_logits = next_token_logits - next_token_logits.max()
-                
                 # Print initial logits stats for debugging
                 print(f"Initial logits - min: {next_token_logits.min():.2f}, max: {next_token_logits.max():.2f}, mean: {next_token_logits.mean():.2f}")
                 
@@ -247,40 +244,53 @@ class DeepSeekWrapper:
                     # Apply repetition penalty
                     if len(generated) > 0:
                         for token in generated:
-                            next_token_logits[token] /= self.repetition_penalty
+                            if next_token_logits[token] > 0:
+                                next_token_logits[token] /= self.repetition_penalty
+                            else:
+                                next_token_logits[token] *= self.repetition_penalty
                     
                     # Apply temperature scaling
                     if self.temperature > 0:
-                        next_token_logits = next_token_logits / self.temperature
+                        scaled_logits = next_token_logits / max(self.temperature, 1e-6)
+                    else:
+                        scaled_logits = next_token_logits
                     
                     # Apply top-k filtering
                     if self.top_k > 0:
-                        top_k = min(self.top_k, next_token_logits.size(-1))
-                        values, _ = torch.topk(next_token_logits, top_k)
-                        min_value = values[-1]
-                        next_token_logits[next_token_logits < min_value] = float('-inf')
+                        indices_to_remove = torch.topk(scaled_logits, min(self.top_k, scaled_logits.size(-1)))[0][-1]
+                        scaled_logits[scaled_logits < indices_to_remove] = float('-inf')
                     
                     # Apply top-p (nucleus) filtering
                     if self.top_p < 1.0:
-                        sorted_logits, sorted_indices = torch.sort(next_token_logits, descending=True)
-                        cumulative_probs = torch.cumsum(torch.softmax(sorted_logits, dim=-1), dim=-1)
+                        sorted_logits, sorted_indices = torch.sort(scaled_logits, descending=True)
+                        cumulative_probs = torch.softmax(sorted_logits, dim=-1).cumsum(dim=-1)
                         
                         # Remove tokens with cumulative probability above the threshold
                         sorted_indices_to_remove = cumulative_probs > self.top_p
-                        sorted_indices_to_remove[1:] = sorted_indices_to_remove[:-1].clone()
-                        sorted_indices_to_remove[0] = 0
+                        sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+                        sorted_indices_to_remove[..., 0] = 0
                         
                         indices_to_remove = sorted_indices[sorted_indices_to_remove]
-                        next_token_logits[indices_to_remove] = float('-inf')
+                        scaled_logits[indices_to_remove] = float('-inf')
                     
-                    # Handle numerical stability before softmax
-                    next_token_logits = next_token_logits - next_token_logits.max()
+                    # Ensure finite values for softmax
+                    max_logit = scaled_logits.max()
+                    if max_logit > 0:
+                        scaled_logits = scaled_logits - max_logit
                     
-                    # Apply softmax
-                    probs = torch.softmax(next_token_logits, dim=-1)
+                    # Handle any remaining inf values
+                    scaled_logits = torch.where(
+                        torch.isinf(scaled_logits),
+                        torch.full_like(scaled_logits, -1e4),
+                        scaled_logits
+                    )
                     
-                    # Sample next token
-                    if torch.isnan(probs).any() or torch.isinf(probs).any() or (probs < 0).any():
+                    # Apply softmax with better numerical stability
+                    exp_logits = torch.exp(scaled_logits)
+                    probs = exp_logits / exp_logits.sum()
+                    
+                    # Ensure valid probabilities
+                    if torch.isnan(probs).any() or (probs.sum() - 1.0).abs() > 1e-3:
                         print("\nWarning: Invalid probabilities detected, falling back to argmax")
                         next_token = torch.argmax(next_token_logits).unsqueeze(0)
                     else:
@@ -306,9 +316,6 @@ class DeepSeekWrapper:
                         next_token_logits = logits[0, -1, :].float()
                     elif len(logits.shape) == 2:
                         next_token_logits = logits[-1, :].float()
-                    
-                    # Handle numerical stability
-                    next_token_logits = next_token_logits - next_token_logits.max()
                     
                     # Decode the token and add to response
                     token_text = self.tokenizer.decode([next_token.item()], skip_special_tokens=True)
