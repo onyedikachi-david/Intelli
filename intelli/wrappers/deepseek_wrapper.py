@@ -81,7 +81,7 @@ class DeepSeekWrapper:
             model_path,
             device="cpu",  # Load on CPU first
             quantize=False,  # Disable quantization during loading
-            dtype=torch.float32  # Use float32 for loading
+            dtype=self.dtype  # Use target dtype for loading
         )
         
         # Initialize model with config from checkpoint
@@ -93,11 +93,11 @@ class DeepSeekWrapper:
             'dim': self.config["hidden_size"],
             'n_layers': self.config["num_hidden_layers"],
             'n_heads': self.config["num_attention_heads"],
-            'vocab_size': self.tokenizer.sp_model.get_piece_size(),  # Use tokenizer vocab size
+            'vocab_size': self.tokenizer.sp_model.get_piece_size(),
             'max_seq_len': self.config["max_sequence_length"],
             'max_batch_size': 32,
             'inter_dim': self.config["intermediate_size"],
-            'dtype': torch.float32,  # Initialize in float32
+            'dtype': self.dtype,  # Use target dtype
             'rope_theta': 10000.0,
             'rope_factor': 40,
             'beta_fast': 32,
@@ -118,8 +118,8 @@ class DeepSeekWrapper:
             if key.startswith("model."):
                 key = key[6:]  # Remove "model." prefix
             
-            # Convert tensor to float32 for stability
-            tensor = tensor.to(torch.float32)
+            # Convert tensor to target dtype
+            tensor = tensor.to(self.dtype)
             
             # Handle key/value projection weights
             if 'k_proj.weight' in key or 'v_proj.weight' in key:
@@ -145,7 +145,7 @@ class DeepSeekWrapper:
                 state_dict[proj_b_key] = torch.eye(
                     in_dim,
                     shard_size,
-                    dtype=torch.float32
+                    dtype=self.dtype
                 )
             # Handle key/value projection biases
             elif 'k_proj.bias' in key or 'v_proj.bias' in key:
@@ -179,10 +179,8 @@ class DeepSeekWrapper:
         if unexpected_keys:
             print(f"Warning: Unexpected keys in state dict: {unexpected_keys}")
         
-        # Move model to device and convert to desired dtype
+        # Move model to device
         self.model = self.model.to(self.device)
-        if self.dtype != torch.float32:
-            self.model = self.model.to(self.dtype)
             
         # Set model to evaluation mode
         self.model.eval()
@@ -305,8 +303,8 @@ class DeepSeekWrapper:
                 else:
                     raise ValueError(f"Unexpected logits shape: {logits.shape}")
                 
-                # Convert to float32 for better numerical stability
-                next_token_logits = next_token_logits.to(torch.float32)
+                # Keep logits in model dtype
+                next_token_logits = next_token_logits.to(self.dtype)
                 
                 # Print raw logits stats
                 print(f"Raw logits - min: {next_token_logits.min().item():.2f}, max: {next_token_logits.max().item():.2f}, mean: {next_token_logits.mean().item():.2f}")
@@ -322,11 +320,11 @@ class DeepSeekWrapper:
                 next_token_logits = next_token_logits - next_token_logits.max()
                 
                 # Add small epsilon to avoid numerical instability
-                next_token_logits = next_token_logits + 1e-10
+                next_token_logits = next_token_logits + torch.finfo(self.dtype).tiny
                 
                 # Apply temperature scaling first
                 if self.temperature > 0:
-                    next_token_logits = next_token_logits / max(self.temperature, 1e-6)
+                    next_token_logits = next_token_logits / max(self.temperature, torch.finfo(self.dtype).tiny)
                 
                 # Apply softmax to get probabilities
                 probs = torch.softmax(next_token_logits, dim=-1)
@@ -361,11 +359,11 @@ class DeepSeekWrapper:
                     
                     # Normalize logits again after repetition penalty
                     next_token_logits = next_token_logits - next_token_logits.max()
-                    next_token_logits = next_token_logits + 1e-10
+                    next_token_logits = next_token_logits + torch.finfo(self.dtype).tiny
                     
                     # Apply temperature scaling
                     if self.temperature > 0:
-                        scaled_logits = next_token_logits / max(self.temperature, 1e-6)
+                        scaled_logits = next_token_logits / max(self.temperature, torch.finfo(self.dtype).tiny)
                     else:
                         scaled_logits = next_token_logits
                     
@@ -460,8 +458,10 @@ class DeepSeekWrapper:
                         elif len(logits.shape) == 2:
                             next_token_logits = logits[-1].clone()
                         
-                        # Convert to float32 and handle NaN/Inf
-                        next_token_logits = next_token_logits.to(torch.float32)
+                        # Keep logits in model dtype
+                        next_token_logits = next_token_logits.to(self.dtype)
+                        
+                        # Handle NaN/Inf values
                         next_token_logits = torch.where(
                             torch.isnan(next_token_logits) | torch.isinf(next_token_logits),
                             torch.zeros_like(next_token_logits),
@@ -469,7 +469,7 @@ class DeepSeekWrapper:
                         )
                         # Normalize logits
                         next_token_logits = next_token_logits - next_token_logits.max()
-                        next_token_logits = next_token_logits + 1e-10  # Add small epsilon
+                        next_token_logits = next_token_logits + torch.finfo(self.dtype).tiny
             
             print("\n")
             
