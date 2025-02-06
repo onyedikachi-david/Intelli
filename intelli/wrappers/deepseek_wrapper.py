@@ -59,12 +59,12 @@ class DeepSeekWrapper:
         self.use_flash_attention = use_flash_attention
         self.max_memory = max_memory
         
-        # Default generation parameters
-        self.temperature = 0.7
-        self.top_p = 0.9
-        self.top_k = 50
+        # Default generation parameters - adjusted for code generation
+        self.temperature = 0.8  # Slightly higher temperature for more creative code
+        self.top_p = 0.95     # Higher top_p for more diverse tokens
+        self.top_k = 0        # Disable top-k to rely on nucleus sampling
         self.max_length = 2048
-        self.repetition_penalty = 1.1
+        self.repetition_penalty = 1.2  # Slightly higher to avoid repetitive code
         
         # Load model
         self._load_model()
@@ -295,15 +295,34 @@ class DeepSeekWrapper:
             temp_params = {k: getattr(self, k) for k in ['temperature', 'top_p', 'top_k', 'max_length', 'repetition_penalty']}
             self.update_params(**kwargs)
         
-        # Format prompt using chat template
+        # Format prompt for code generation
+        if ":" in prompt and not prompt.strip().endswith(":"):
+            # If prompt contains ":" but doesn't end with it, it's likely a request for code
+            # Add some context to help the model
+            formatted_prompt = f"""Write a complete and efficient implementation for the following:
+
+{prompt}
+
+Here's the implementation:
+
+```python
+"""
+        else:
+            formatted_prompt = prompt
+            
+        # Format as chat messages
         messages = [
-            {"role": "user", "content": prompt}
+            {"role": "system", "content": "You are a helpful AI programming assistant. Write clean, efficient, and well-documented code."},
+            {"role": "user", "content": formatted_prompt}
         ]
+        
+        # Get input tokens
         input_ids = self.tokenizer.apply_chat_template(messages)
         input_ids = torch.tensor(input_ids, dtype=torch.long, device=self.device).unsqueeze(0)
         
         # Track generated tokens for repetition penalty
         generated = []
+        response_text = ""
         
         # Generate tokens
         print(f"\nGeneration started (max_length={self.max_length})...")
@@ -321,12 +340,6 @@ class DeepSeekWrapper:
                 # Apply temperature scaling
                 if self.temperature > 0:
                     next_token_logits = next_token_logits / self.temperature
-                
-                # Apply top-k filtering
-                if self.top_k > 0:
-                    top_k = min(self.top_k, next_token_logits.size(-1))
-                    indices_to_remove = next_token_logits < torch.topk(next_token_logits, top_k)[0][..., -1, None]
-                    next_token_logits[indices_to_remove] = float('-inf')
                 
                 # Apply top-p (nucleus) filtering
                 if self.top_p < 1.0:
@@ -361,15 +374,22 @@ class DeepSeekWrapper:
                 generated.append(next_token.item())
                 input_ids = torch.cat([input_ids, next_token.unsqueeze(0)], dim=1)
                 
-                # Print progress
+                # Decode the token and add to response
                 token_text = self.tokenizer.decode([next_token.item()], skip_special_tokens=True)
-                if token_text:  # Only print if token produces visible text
-                    print(f"\rProcessing token {i+1}/{self.max_length} | Last token: '{token_text}'", end="", flush=True)
+                if token_text:
+                    response_text += token_text
+                    # Print progress with actual generated text
+                    print(f"\rGenerated ({i+1} tokens): {response_text}", end="", flush=True)
                 
-                # Stop if we hit the EOS token or assistant end token
-                if (next_token.item() == self.tokenizer.eos_token_id or 
-                    next_token.item() == self.tokenizer.sp_model.piece_to_id('<|user|>')):
+                # Check for code block end or other stop conditions
+                if "```" in response_text and response_text.count("```") >= 2:
+                    print("\nGeneration complete: Code block finished")
+                    break
+                elif next_token.item() in [self.tokenizer.eos_token_id, self.tokenizer.user_token_id]:
                     print("\nGeneration complete: End token reached")
+                    break
+                elif i >= 5 and all(c.isspace() for c in response_text[-5:]):
+                    print("\nGeneration complete: Multiple spaces detected")
                     break
         
         print("\n")  # New line after generation
@@ -378,15 +398,13 @@ class DeepSeekWrapper:
         if kwargs:
             self.update_params(**temp_params)
         
-        # Extract only the assistant's response from the generated text
-        full_text = self.tokenizer.decode(input_ids[0].tolist(), skip_special_tokens=True)
-        try:
-            # Try to extract just the response part after the prompt
-            response = full_text.split(prompt, 1)[1]
-        except IndexError:
-            response = full_text
-        
-        return response.strip()
+        # Clean up the response
+        if "```python" in response_text:
+            # Extract code from markdown code block
+            code = response_text.split("```python")[1].split("```")[0].strip()
+            return code
+        else:
+            return response_text.strip()
     
     def __call__(self, prompt: str, **kwargs) -> str:
         """Alias for generate method."""

@@ -42,6 +42,7 @@ class DeepSeekTokenizer:
             with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
                 # Write basic vocabulary with special tokens first
                 basic_vocab = [
+                    # Special tokens
                     "<|endoftext|>",
                     "<|user|>",
                     "<|assistant|>",
@@ -49,17 +50,42 @@ class DeepSeekTokenizer:
                     "<s>",
                     "</s>",
                     "<pad>",
-                    ".", ",", "!", "?", "-", "'", '"', "\n",
-                    # Programming-specific tokens
-                    "def", "class", "return", "import", "from", "if", "else", "for", "while",
-                    "try", "except", "raise", "with", "as", "in", "is", "not", "and", "or",
-                    "True", "False", "None", "self", "__init__", "print", "range", "len",
+                    # Code block markers
+                    "```",
+                    "```python",
+                    "```java",
+                    "```javascript",
+                    "```cpp",
+                    # Basic punctuation
+                    ".", ",", "!", "?", "-", "'", '"', "\n", " ", "\t",
+                    "(", ")", "[", "]", "{", "}", ":", ";", "+", "-", "*", "/", "%",
+                    "=", "==", "!=", "<", ">", "<=", ">=", "+=", "-=", "*=", "/=",
+                    # Programming keywords
+                    "def", "class", "return", "import", "from", "if", "else", "elif", "for", "while",
+                    "try", "except", "finally", "raise", "with", "as", "in", "is", "not", "and", "or",
+                    "True", "False", "None", "self", "__init__", "print", "range", "len", "str", "int",
+                    "float", "list", "dict", "set", "tuple", "lambda", "map", "filter", "reduce",
+                    # Common programming patterns
+                    "return", "yield", "break", "continue", "pass", "assert", "raise",
+                    # Common variable names
+                    "i", "j", "k", "n", "x", "y", "z", "arr", "nums", "result", "res", "val", "data",
+                    # Common function names
+                    "main", "sum", "min", "max", "abs", "sort", "sorted", "reverse", "append", "extend",
+                    "insert", "remove", "pop", "clear", "index", "count", "copy", "deepcopy",
+                    # Common types and modules
+                    "object", "Exception", "TypeError", "ValueError", "RuntimeError",
+                    "os", "sys", "math", "random", "datetime", "collections", "itertools",
                     # Add basic characters
                     *[chr(i) for i in range(ord('a'), ord('z')+1)],  # a-z
                     *[chr(i) for i in range(ord('A'), ord('Z')+1)],  # A-Z
                     *[chr(i) for i in range(ord('0'), ord('9')+1)],  # 0-9
-                    *[chr(i) for i in range(0x4E00, 0x9FFF)]  # Common Chinese characters
+                    # Common programming subwords
+                    *["_" + c for c in "abcdefghijklmnopqrstuvwxyz"],  # _a, _b, etc.
+                    *[c + "_" for c in "abcdefghijklmnopqrstuvwxyz"],  # a_, b_, etc.
+                    # Common Chinese characters (for multilingual support)
+                    *[chr(i) for i in range(0x4E00, 0x9FFF)]
                 ]
+                # Write tokens to file
                 for token in basic_vocab:
                     f.write(f"{token}\n")
                 f.flush()
@@ -73,13 +99,18 @@ class DeepSeekTokenizer:
                     '--model_type=unigram '
                     '--pad_id=0 --bos_id=1 --eos_id=2 --unk_id=3 '
                     '--control_symbols=<|user|>,<|assistant|>,<|system|> '
-                    '--user_defined_symbols=<s>,</s>,<pad> '
+                    '--user_defined_symbols=<s>,</s>,<pad>,```python,``` '
                     '--treat_whitespace_as_suffix=true '
                     '--remove_extra_whitespaces=false '
                     '--byte_fallback=true '
                     '--normalization_rule_name=identity '
                     '--add_dummy_prefix=false '
-                    '--max_sentence_length=8192'
+                    '--max_sentence_length=8192 '
+                    '--split_digits=false '
+                    '--split_by_unicode_script=false '
+                    '--split_by_whitespace=true '
+                    '--split_by_number=false '
+                    '--split_by_punctuation=false'
                 )
                 
                 # Clean up
