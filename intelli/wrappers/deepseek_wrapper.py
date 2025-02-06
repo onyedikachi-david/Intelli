@@ -79,9 +79,9 @@ class DeepSeekWrapper:
         # Load model with optimizations
         model_data = loader.load_model(
             model_path,
-            device=self.device,
-            quantize=self.quantize,
-            dtype=self.dtype
+            device="cpu",  # Load on CPU first
+            quantize=False,  # Disable quantization during loading
+            dtype=torch.float32  # Use float32 for loading
         )
         
         # Initialize model with config from checkpoint
@@ -97,7 +97,7 @@ class DeepSeekWrapper:
             'max_seq_len': self.config["max_sequence_length"],
             'max_batch_size': 32,
             'inter_dim': self.config["intermediate_size"],
-            'dtype': self.dtype,
+            'dtype': torch.float32,  # Initialize in float32
             'rope_theta': 10000.0,
             'rope_factor': 40,
             'beta_fast': 32,
@@ -107,7 +107,7 @@ class DeepSeekWrapper:
         
         # Initialize model with args from checkpoint
         args = ModelArgs(**model_args)
-        self.model = Transformer(args).to(self.device)
+        self.model = Transformer(args)
         
         # Load state dict
         state_dict = {}
@@ -118,8 +118,8 @@ class DeepSeekWrapper:
             if key.startswith("model."):
                 key = key[6:]  # Remove "model." prefix
             
-            # Convert tensor to correct dtype
-            tensor = tensor.to(self.dtype)
+            # Convert tensor to float32 for stability
+            tensor = tensor.to(torch.float32)
             
             # Handle key/value projection weights
             if 'k_proj.weight' in key or 'v_proj.weight' in key:
@@ -145,8 +145,7 @@ class DeepSeekWrapper:
                 state_dict[proj_b_key] = torch.eye(
                     in_dim,
                     shard_size,
-                    device=tensor.device,
-                    dtype=tensor.dtype
+                    dtype=torch.float32
                 )
             # Handle key/value projection biases
             elif 'k_proj.bias' in key or 'v_proj.bias' in key:
@@ -179,6 +178,11 @@ class DeepSeekWrapper:
             print(f"Warning: Missing keys in state dict: {missing_keys}")
         if unexpected_keys:
             print(f"Warning: Unexpected keys in state dict: {unexpected_keys}")
+        
+        # Move model to device and convert to desired dtype
+        self.model = self.model.to(self.device)
+        if self.dtype != torch.float32:
+            self.model = self.model.to(self.dtype)
             
         # Set model to evaluation mode
         self.model.eval()
@@ -314,8 +318,11 @@ class DeepSeekWrapper:
                     next_token_logits
                 )
                 
+                # Normalize logits to prevent overflow
+                next_token_logits = next_token_logits - next_token_logits.max()
+                
                 # Add small epsilon to avoid numerical instability
-                next_token_logits = next_token_logits + 1e-8
+                next_token_logits = next_token_logits + 1e-10
                 
                 # Apply temperature scaling first
                 if self.temperature > 0:
@@ -351,6 +358,10 @@ class DeepSeekWrapper:
                                     next_token_logits[token] /= self.repetition_penalty
                                 else:
                                     next_token_logits[token] *= self.repetition_penalty
+                    
+                    # Normalize logits again after repetition penalty
+                    next_token_logits = next_token_logits - next_token_logits.max()
+                    next_token_logits = next_token_logits + 1e-10
                     
                     # Apply temperature scaling
                     if self.temperature > 0:
@@ -456,7 +467,9 @@ class DeepSeekWrapper:
                             torch.zeros_like(next_token_logits),
                             next_token_logits
                         )
-                        next_token_logits = next_token_logits + 1e-8  # Add small epsilon
+                        # Normalize logits
+                        next_token_logits = next_token_logits - next_token_logits.max()
+                        next_token_logits = next_token_logits + 1e-10  # Add small epsilon
             
             print("\n")
             
