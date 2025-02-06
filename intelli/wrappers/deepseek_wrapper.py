@@ -242,18 +242,21 @@ class DeepSeekWrapper:
                     device=tensor.device,
                     dtype=tensor.dtype
                 )
+            # Handle key/value projection biases
+            elif 'k_proj.bias' in key or 'v_proj.bias' in key:
+                # Get layer number from key
+                layer_num = int(key.split('.')[1])
+                base_key = key.replace('k_proj', 'k_proj_a').replace('v_proj', 'v_proj_a')
                 
-                # Handle biases
-                if f"{key[:-7]}.bias" in model_data["weights"]:
-                    bias = model_data["weights"][f"{key[:-7]}.bias"]
-                    if isinstance(bias, LazyTensor):
-                        bias = bias.materialize()
-                    
-                    # Split bias into shards
-                    bias = bias.view(mp_size, shard_size)
-                    for i in range(mp_size):
-                        bias_key = f"{base_key[:-7]}.{i}.bias"
-                        state_dict[bias_key] = bias[i].contiguous()
+                # Split bias into shards
+                mp_size = 8
+                shard_size = args.kv_lora_rank // mp_size  # 32
+                bias = tensor.view(mp_size, shard_size)  # [8, 32]
+                
+                # Add each shard to state dict
+                for i in range(mp_size):
+                    bias_key = f"{base_key[:-5]}.{i}.bias"  # Replace .bias with shard index
+                    state_dict[bias_key] = bias[i].contiguous()
             else:
                 state_dict[key] = tensor
         

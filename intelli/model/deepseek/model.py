@@ -150,6 +150,71 @@ class Attention(nn.Module):
         if args.max_seq_len > args.original_seq_len:
             self.scale *= args.mscale
 
+    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs):
+        """Custom state dict loading to handle model parallel sharding."""
+        # Handle key projection weights and biases
+        k_proj_weight = state_dict.pop(prefix + 'k_proj.weight', None)
+        k_proj_bias = state_dict.pop(prefix + 'k_proj.bias', None)
+        
+        if k_proj_weight is not None:
+            # Reshape weight for model parallel sharding
+            weight = k_proj_weight.view(self.lora_rank, self.hidden_size)  # [256, 1536]
+            
+            # Split into 8 shards
+            weight = weight.view(self.mp_size, self.shard_size, self.hidden_size)  # [8, 32, 1536]
+            
+            # Add each shard to state dict
+            for i in range(self.mp_size):
+                state_dict[f"{prefix}k_proj_a.{i}.weight"] = weight[i].contiguous()
+            
+            # Add proj_b weights (shared across shards)
+            state_dict[f"{prefix}k_proj_b.weight"] = torch.eye(
+                self.hidden_size,
+                self.shard_size,
+                device=k_proj_weight.device,
+                dtype=k_proj_weight.dtype
+            )
+            
+            # Handle biases
+            if k_proj_bias is not None:
+                # Split bias into shards
+                bias = k_proj_bias.view(self.mp_size, self.shard_size)  # [8, 32]
+                for i in range(self.mp_size):
+                    state_dict[f"{prefix}k_proj_a.{i}.bias"] = bias[i].contiguous()
+        
+        # Handle value projection weights and biases
+        v_proj_weight = state_dict.pop(prefix + 'v_proj.weight', None)
+        v_proj_bias = state_dict.pop(prefix + 'v_proj.bias', None)
+        
+        if v_proj_weight is not None:
+            # Reshape weight for model parallel sharding
+            weight = v_proj_weight.view(self.lora_rank, self.hidden_size)  # [256, 1536]
+            
+            # Split into 8 shards
+            weight = weight.view(self.mp_size, self.shard_size, self.hidden_size)  # [8, 32, 1536]
+            
+            # Add each shard to state dict
+            for i in range(self.mp_size):
+                state_dict[f"{prefix}v_proj_a.{i}.weight"] = weight[i].contiguous()
+            
+            # Add proj_b weights (shared across shards)
+            state_dict[f"{prefix}v_proj_b.weight"] = torch.eye(
+                self.hidden_size,
+                self.shard_size,
+                device=v_proj_weight.device,
+                dtype=v_proj_weight.dtype
+            )
+            
+            # Handle biases
+            if v_proj_bias is not None:
+                # Split bias into shards
+                bias = v_proj_bias.view(self.mp_size, self.shard_size)  # [8, 32]
+                for i in range(self.mp_size):
+                    state_dict[f"{prefix}v_proj_a.{i}.bias"] = bias[i].contiguous()
+        
+        # Let parent class handle the rest
+        super()._load_from_state_dict(state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs)
+
     def forward(self, x: torch.Tensor, start_pos: int, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         B, T, C = x.size()
         H = self.n_heads
@@ -190,11 +255,6 @@ class Attention(nn.Module):
         out = torch.einsum("bhts,bshd->bthd", attn, v)
         out = out.reshape(B, T, C)
         return self.o_proj(out)
-
-    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs):
-        """Custom state dict loading to handle model parallel sharding."""
-        # Let parent class handle non-sharded weights
-        super()._load_from_state_dict(state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs)
 
 
 class FeedForward(nn.Module):
