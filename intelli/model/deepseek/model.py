@@ -58,22 +58,11 @@ class RotaryEmbedding(nn.Module):
     """Rotary positional embeddings."""
     def __init__(self, dim: int, max_seq_len: int = 4096):
         super().__init__()
-        # Ensure dim matches your actual head dimension
-        inv_freq = 1.0 / (10000 ** (torch.arange(0, dim//2, 2).float() / (dim//2)))  # Modified
+        inv_freq = 1.0 / (10000 ** (torch.arange(0, dim//2, 2).float() / (dim//2)))
         t = torch.arange(max_seq_len, dtype=inv_freq.dtype)
         freqs = torch.outer(t, inv_freq)
         self.register_buffer("cos", freqs.cos())
         self.register_buffer("sin", freqs.sin())
-
-    def forward(self, x: torch.Tensor, start_pos: int = 0):
-        seq_len = x.size(1)
-        cos = self.cos[start_pos : start_pos + seq_len]
-        sin = self.sin[start_pos : start_pos + seq_len]
-        # Ensure proper dimension expansion for broadcasting
-        cos = cos.view(1, seq_len, 1, -1)  # Add batch and head dimensions
-        sin = sin.view(1, seq_len, 1, -1)
-        x1, x2 = x.chunk(2, dim=-1)
-        return torch.cat((x1 * cos - x2 * sin, x2 * cos + x1 * sin), dim=-1)
 
 
 class Attention(nn.Module):
@@ -91,7 +80,7 @@ class Attention(nn.Module):
         self.v_proj = nn.Linear(args.dim, 256, bias=True)
         self.o_proj = nn.Linear(args.dim, args.dim, bias=False)
         
-        self.rope = RotaryEmbedding(self.head_dim)
+        self.rope = RotaryEmbedding(dim=self.head_dim, max_seq_len=args.max_seq_len)
         self.scale = self.head_dim ** -0.5
         
         # Store rope dimensions
@@ -210,4 +199,19 @@ class Transformer(nn.Module):
         h = self.norm(h)
         logits = self.lm_head(h)
         
-        return logits 
+        return logits
+
+    def _load_model(self):
+        state_dict = torch.load("model.pth", map_location="cpu")
+        model_state = self.state_dict()
+        
+        # Match existing parameters and ignore missing rope buffers
+        matched_state = {k: v for k,v in state_dict.items() 
+                        if k in model_state and v.shape == model_state[k].shape}
+        
+        # For conversion from old checkpoints
+        for name in model_state:
+            if "rope" in name and name not in matched_state:
+                print(f"Initializing new parameter: {name}")
+                
+        self.load_state_dict(matched_state, strict=False) 
