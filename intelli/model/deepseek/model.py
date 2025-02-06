@@ -119,30 +119,24 @@ class Attention(nn.Module):
         self.n_heads = args.n_heads
         self.head_dim = args.dim // args.n_heads
         
-        # Compute dimensions for different attention components
-        self.qk_nope_dim = args.qk_nope_head_dim * args.n_heads
-        self.qk_rope_dim = args.qk_rope_head_dim * args.n_heads
-        self.v_dim = args.v_head_dim * args.n_heads
+        # Store dimensions
+        self.hidden_size = args.dim
+        self.lora_rank = args.kv_lora_rank
         
-        # Query uses full dimension with split between RoPE and non-RoPE parts
-        self.q_proj = nn.Linear(args.dim, args.dim, bias=True)
+        # Query uses full dimension
+        self.q_proj = nn.Linear(self.hidden_size, self.hidden_size, bias=True)
         
-        # Key/Value use LoRA-style projections for dimension reduction
-        self.k_proj_a = nn.Linear(args.dim, args.kv_lora_rank, bias=True)
-        self.k_proj_b = nn.Linear(args.kv_lora_rank, 256, bias=True)  # 256 = qk_nope_dim + qk_rope_dim per head
-        self.k_norm = nn.LayerNorm(args.kv_lora_rank)
+        # Key/Value use LoRA-style projections
+        self.k_proj_a = nn.Linear(self.hidden_size, self.lora_rank, bias=True)
+        self.k_proj_b = nn.Linear(self.lora_rank, self.hidden_size, bias=True)
         
-        self.v_proj_a = nn.Linear(args.dim, args.kv_lora_rank, bias=True)
-        self.v_proj_b = nn.Linear(args.kv_lora_rank, 256, bias=True)  # 256 = v_head_dim per head
-        self.v_norm = nn.LayerNorm(args.kv_lora_rank)
+        self.v_proj_a = nn.Linear(self.hidden_size, self.lora_rank, bias=True)
+        self.v_proj_b = nn.Linear(self.lora_rank, self.hidden_size, bias=True)
         
-        self.o_proj = nn.Linear(args.dim, args.dim, bias=False)
+        self.o_proj = nn.Linear(self.hidden_size, self.hidden_size, bias=False)
         
         self.rope = RotaryEmbedding(args)
         self.scale = self.head_dim ** -0.5
-        
-        # Store rope dimensions
-        self.rope_dim = args.qk_rope_head_dim
         
         # Apply extended context scaling if needed
         if args.max_seq_len > args.original_seq_len:
@@ -158,7 +152,6 @@ class Attention(nn.Module):
             try:
                 # Check for non-finite values
                 if not torch.isfinite(k_proj_weight).all():
-                    # Replace non-finite values with 0
                     k_proj_weight = torch.nan_to_num(k_proj_weight, nan=0.0, posinf=0.0, neginf=0.0)
                 
                 # Add small noise for numerical stability
@@ -166,7 +159,7 @@ class Attention(nn.Module):
                 k_proj_weight = k_proj_weight + torch.randn_like(k_proj_weight) * noise_scale
                 
                 # Convert k_proj weights to LoRA format
-                rank = self.k_proj_a.out_features
+                rank = self.lora_rank
                 try:
                     # Try SVD with the stabilized matrix
                     U, S, Vh = torch.linalg.svd(k_proj_weight, full_matrices=False)
@@ -182,7 +175,7 @@ class Attention(nn.Module):
                 
                 # Take top-k components with numerical stability
                 eps = 1e-6
-                S = torch.clamp(S, min=eps)  # Ensure no zero singular values
+                S = torch.clamp(S, min=eps)
                 U = U[:, :rank] * torch.sqrt(S[:rank]).unsqueeze(0)
                 Vh = torch.sqrt(S[:rank]).unsqueeze(1) * Vh[:rank, :]
                 
@@ -196,14 +189,14 @@ class Attention(nn.Module):
                 error_msgs.append(f'Error converting k_proj weights: {str(e)}')
                 # Fallback: Initialize with random weights
                 state_dict[prefix + 'k_proj_a.weight'] = torch.randn(
-                    self.k_proj_a.out_features,
-                    k_proj_weight.size(1),
+                    self.lora_rank,
+                    self.hidden_size,
                     device=k_proj_weight.device,
                     dtype=k_proj_weight.dtype
                 ) * 0.02
                 state_dict[prefix + 'k_proj_b.weight'] = torch.randn(
-                    rank,
-                    k_proj_weight.size(0),
+                    self.hidden_size,
+                    self.lora_rank,
                     device=k_proj_weight.device,
                     dtype=k_proj_weight.dtype
                 ) * 0.02
@@ -216,7 +209,6 @@ class Attention(nn.Module):
             try:
                 # Check for non-finite values
                 if not torch.isfinite(v_proj_weight).all():
-                    # Replace non-finite values with 0
                     v_proj_weight = torch.nan_to_num(v_proj_weight, nan=0.0, posinf=0.0, neginf=0.0)
                 
                 # Add small noise for numerical stability
@@ -224,7 +216,7 @@ class Attention(nn.Module):
                 v_proj_weight = v_proj_weight + torch.randn_like(v_proj_weight) * noise_scale
                 
                 # Convert v_proj weights to LoRA format
-                rank = self.v_proj_a.out_features
+                rank = self.lora_rank
                 try:
                     # Try SVD with the stabilized matrix
                     U, S, Vh = torch.linalg.svd(v_proj_weight, full_matrices=False)
@@ -240,7 +232,7 @@ class Attention(nn.Module):
                 
                 # Take top-k components with numerical stability
                 eps = 1e-6
-                S = torch.clamp(S, min=eps)  # Ensure no zero singular values
+                S = torch.clamp(S, min=eps)
                 U = U[:, :rank] * torch.sqrt(S[:rank]).unsqueeze(0)
                 Vh = torch.sqrt(S[:rank]).unsqueeze(1) * Vh[:rank, :]
                 
@@ -254,25 +246,17 @@ class Attention(nn.Module):
                 error_msgs.append(f'Error converting v_proj weights: {str(e)}')
                 # Fallback: Initialize with random weights
                 state_dict[prefix + 'v_proj_a.weight'] = torch.randn(
-                    self.v_proj_a.out_features,
-                    v_proj_weight.size(1),
+                    self.lora_rank,
+                    self.hidden_size,
                     device=v_proj_weight.device,
                     dtype=v_proj_weight.dtype
                 ) * 0.02
                 state_dict[prefix + 'v_proj_b.weight'] = torch.randn(
-                    rank,
-                    v_proj_weight.size(0),
+                    self.hidden_size,
+                    self.lora_rank,
                     device=v_proj_weight.device,
                     dtype=v_proj_weight.dtype
                 ) * 0.02
-        
-        # Initialize norm layers if not present
-        if prefix + 'k_norm.weight' not in state_dict:
-            state_dict[prefix + 'k_norm.weight'] = torch.ones(self.k_proj_a.out_features)
-            state_dict[prefix + 'k_norm.bias'] = torch.zeros(self.k_proj_a.out_features)
-        if prefix + 'v_norm.weight' not in state_dict:
-            state_dict[prefix + 'v_norm.weight'] = torch.ones(self.v_proj_a.out_features)
-            state_dict[prefix + 'v_norm.bias'] = torch.zeros(self.v_proj_a.out_features)
         
         # Load the rest of the state dict
         super()._load_from_state_dict(state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs)
@@ -281,32 +265,23 @@ class Attention(nn.Module):
         B, T, C = x.size()
         H = self.n_heads
         
-        # Query projection with split dimensions
+        # Query projection
         q = self.q_proj(x)  # [B, T, C]
         q = q.view(B, T, H, -1)  # [B, T, H, head_dim]
         
         # Key projection with LoRA
-        k = self.k_proj_a(x)  # [B, T, kv_lora_rank]
-        k = self.k_norm(k)
-        k = self.k_proj_b(k)  # [B, T, 256]
-        k = k.view(B, T, 1, 256).expand(B, T, H, 256)  # [B, T, H, 256]
+        k = self.k_proj_a(x)  # [B, T, lora_rank]
+        k = self.k_proj_b(k)  # [B, T, hidden_size]
+        k = k.view(B, T, H, -1)  # [B, T, H, head_dim]
         
         # Value projection with LoRA
-        v = self.v_proj_a(x)  # [B, T, kv_lora_rank]
-        v = self.v_norm(v)
-        v = self.v_proj_b(v)  # [B, T, 256]
-        v = v.view(B, T, 1, 256).expand(B, T, H, 256)  # [B, T, H, 256]
+        v = self.v_proj_a(x)  # [B, T, lora_rank]
+        v = self.v_proj_b(v)  # [B, T, hidden_size]
+        v = v.view(B, T, H, -1)  # [B, T, H, head_dim]
         
-        # Apply rotary embeddings only to the RoPE part of query and key
-        q_rope_dim = self.rope_dim * 2  # Multiply by 2 since we need pairs for rotation
-        q_rope = q[..., :q_rope_dim]  # [B, T, H, rope_dim*2]
-        q_rope = self.rope(q_rope, start_pos)  # Apply RoPE
-        
-        # Concatenate RoPE and non-RoPE parts
-        if q.shape[-1] > q_rope_dim:
-            q = torch.cat([q_rope, q[..., q_rope_dim:]], dim=-1)
-        else:
-            q = q_rope
+        # Apply rotary embeddings
+        q = self.rope(q, start_pos)
+        k = self.rope(k, start_pos)
         
         # Compute attention
         attn = torch.einsum("bthd,bshd->bhts", q, k) * self.scale
