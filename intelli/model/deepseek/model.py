@@ -85,10 +85,10 @@ class Attention(nn.Module):
         self.n_heads = args.n_heads
         self.head_dim = args.dim // args.n_heads
         
-        self.wq = nn.Linear(args.dim, args.dim, bias=False)
-        self.wk = nn.Linear(args.dim, args.dim, bias=False)
-        self.wv = nn.Linear(args.dim, args.dim, bias=False)
-        self.wo = nn.Linear(args.dim, args.dim, bias=False)
+        self.q_proj = nn.Linear(args.dim, args.dim, bias=True)
+        self.k_proj = nn.Linear(args.dim, args.dim, bias=True)
+        self.v_proj = nn.Linear(args.dim, args.dim, bias=True)
+        self.o_proj = nn.Linear(args.dim, args.dim, bias=False)
         
         self.rope = RotaryEmbedding(args)
         self.scale = self.head_dim ** -0.5
@@ -101,9 +101,9 @@ class Attention(nn.Module):
         B, T, C = x.size()
         
         # Linear projections
-        q = self.wq(x).view(B, T, self.n_heads, self.head_dim)
-        k = self.wk(x).view(B, T, self.n_heads, self.head_dim)
-        v = self.wv(x).view(B, T, self.n_heads, self.head_dim)
+        q = self.q_proj(x).view(B, T, self.n_heads, self.head_dim)
+        k = self.k_proj(x).view(B, T, self.n_heads, self.head_dim)
+        v = self.v_proj(x).view(B, T, self.n_heads, self.head_dim)
         
         # Apply rotary embeddings
         q = self.rope(q, start_pos)
@@ -118,33 +118,33 @@ class Attention(nn.Module):
         # Compute output
         out = torch.einsum("bhts,bshd->bthd", attn, v)
         out = out.reshape(B, T, C)
-        return self.wo(out)
+        return self.o_proj(out)
 
 
 class FeedForward(nn.Module):
     """Feed-forward network with SwiGLU activation."""
     def __init__(self, args: ModelArgs):
         super().__init__()
-        self.w1 = nn.Linear(args.dim, args.inter_dim, bias=False)
-        self.w2 = nn.Linear(args.inter_dim, args.dim, bias=False)
-        self.w3 = nn.Linear(args.dim, args.inter_dim, bias=False)
+        self.gate_proj = nn.Linear(args.dim, args.inter_dim, bias=False)
+        self.up_proj = nn.Linear(args.dim, args.inter_dim, bias=False)
+        self.down_proj = nn.Linear(args.inter_dim, args.dim, bias=False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.w2(F.silu(self.w1(x)) * self.w3(x))
+        return self.down_proj(F.silu(self.gate_proj(x)) * self.up_proj(x))
 
 
 class TransformerBlock(nn.Module):
     """Transformer block with attention and feed-forward layers."""
     def __init__(self, args: ModelArgs):
         super().__init__()
-        self.attn = Attention(args)
-        self.ff = FeedForward(args)
-        self.attn_norm = RMSNorm(args.dim)
-        self.ff_norm = RMSNorm(args.dim)
+        self.self_attn = Attention(args)
+        self.mlp = FeedForward(args)
+        self.input_layernorm = RMSNorm(args.dim)
+        self.post_attention_layernorm = RMSNorm(args.dim)
 
     def forward(self, x: torch.Tensor, start_pos: int, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
-        x = x + self.attn(self.attn_norm(x), start_pos, mask)
-        x = x + self.ff(self.ff_norm(x))
+        x = x + self.self_attn(self.input_layernorm(x), start_pos, mask)
+        x = x + self.mlp(self.post_attention_layernorm(x))
         return x
 
 
@@ -156,16 +156,31 @@ class Transformer(nn.Module):
         self.vocab_size = args.vocab_size
         self.n_layers = args.n_layers
         
-        self.tok_embeddings = nn.Embedding(args.vocab_size, args.dim)
+        self.embed_tokens = nn.Embedding(args.vocab_size, args.dim)
         self.layers = nn.ModuleList([TransformerBlock(args) for _ in range(args.n_layers)])
         self.norm = RMSNorm(args.dim)
-        self.output = nn.Linear(args.dim, args.vocab_size, bias=False)
+        self.lm_head = nn.Linear(args.dim, args.vocab_size, bias=False)
+
+        # Initialize weights
+        self.apply(self._init_weights)
+        # Apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('o_proj.weight') or pn.endswith('down_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * args.n_layers))
+
+    def _init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            if module.bias is not None:
+                torch.nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
     def forward(self, tokens: torch.Tensor, start_pos: int = 0) -> torch.Tensor:
         B, T = tokens.size()
         
         # Get embeddings
-        h = self.tok_embeddings(tokens)
+        h = self.embed_tokens(tokens)
         
         # Create attention mask
         mask = None
@@ -180,6 +195,6 @@ class Transformer(nn.Module):
         
         # Output projection
         h = self.norm(h)
-        logits = self.output(h)
+        logits = self.lm_head(h)
         
         return logits 
