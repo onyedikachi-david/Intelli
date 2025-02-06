@@ -216,13 +216,26 @@ class DeepSeekWrapper:
             # Generate tokens
             print(f"\nGeneration started (max_length={self.max_length})...")
             
-            # Initial forward pass to get past key/values
+            # Initial forward pass
             with torch.no_grad():
                 outputs = self.model(input_ids)
-                logits = outputs[0]  # [batch_size, seq_len, vocab_size]
                 
-                # Get last token logits
-                next_token_logits = logits[0, -1, :].float()
+                # Handle different output formats
+                if isinstance(outputs, tuple):
+                    logits = outputs[0]
+                else:
+                    logits = outputs
+                
+                # Print shape info for debugging
+                print(f"Model output shape: {logits.shape}")
+                
+                # Get last token logits based on shape
+                if len(logits.shape) == 3:
+                    next_token_logits = logits[0, -1, :].float()
+                elif len(logits.shape) == 2:
+                    next_token_logits = logits[-1, :].float()
+                else:
+                    raise ValueError(f"Unexpected logits shape: {logits.shape}")
                 
                 # Print initial logits stats for debugging
                 print(f"Initial logits - min: {next_token_logits.min():.2f}, max: {next_token_logits.max():.2f}, mean: {next_token_logits.mean():.2f}")
@@ -274,7 +287,16 @@ class DeepSeekWrapper:
                     
                     # Get next token's logits
                     outputs = self.model(input_ids)
-                    next_token_logits = outputs[0][0, -1, :].float()
+                    if isinstance(outputs, tuple):
+                        logits = outputs[0]
+                    else:
+                        logits = outputs
+                        
+                    # Get next token logits based on shape
+                    if len(logits.shape) == 3:
+                        next_token_logits = logits[0, -1, :].float()
+                    elif len(logits.shape) == 2:
+                        next_token_logits = logits[-1, :].float()
                     
                     # Decode the token and add to response
                     token_text = self.tokenizer.decode([next_token.item()], skip_special_tokens=True)
