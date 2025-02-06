@@ -81,21 +81,23 @@ class RotaryEmbedding(nn.Module):
         t = torch.arange(start_pos, start_pos + seq_len, device=x.device)
         freqs = torch.einsum("i,j->ij", t, self.inv_freq)  # [seq_len, dim/2]
         
-        # Compute cos and sin
-        cos = torch.cat([freqs.cos(), freqs.cos()], dim=-1)  # [seq_len, dim]
-        sin = torch.cat([freqs.sin(), freqs.sin()], dim=-1)  # [seq_len, dim]
+        # Compute cos and sin for half the dimension
+        cos = freqs.cos()  # [seq_len, dim/2]
+        sin = freqs.sin()  # [seq_len, dim/2]
         
         # Reshape for broadcasting
-        cos = cos.view(1, seq_len, 1, -1)  # [1, seq_len, 1, dim]
-        sin = sin.view(1, seq_len, 1, -1)  # [1, seq_len, 1, dim]
+        cos = cos.view(1, seq_len, 1, -1)  # [1, seq_len, 1, dim/2]
+        sin = sin.view(1, seq_len, 1, -1)  # [1, seq_len, 1, dim/2]
         
-        # Compute rotary embeddings
-        x_rope = torch.cat([
-            x[..., ::2],  # Even indices
-            x[..., 1::2]  # Odd indices
+        # Split input into even and odd dimensions
+        x_even = x[..., ::2]  # [B, T, H, dim/2]
+        x_odd = x[..., 1::2]  # [B, T, H, dim/2]
+        
+        # Apply rotation
+        x_rotated = torch.cat([
+            x_even * cos - x_odd * sin,  # Real part
+            x_odd * cos + x_even * sin,  # Imaginary part
         ], dim=-1)
-        
-        x_rotated = x_rope * cos + torch.roll(x_rope, shifts=x_rope.shape[-1]//2, dims=-1) * sin
         
         return x_rotated
 
