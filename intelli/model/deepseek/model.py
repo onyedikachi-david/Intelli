@@ -86,9 +86,13 @@ class Attention(nn.Module):
         self.n_heads = args.n_heads
         self.head_dim = args.dim // args.n_heads
         
+        # Query uses full dimension
         self.q_proj = nn.Linear(args.dim, args.dim, bias=True)
-        self.k_proj = nn.Linear(args.dim, args.dim, bias=True)
-        self.v_proj = nn.Linear(args.dim, args.dim, bias=True)
+        
+        # Key and Value use reduced dimension (256 per head)
+        kv_dim = 256 * args.n_heads
+        self.k_proj = nn.Linear(args.dim, kv_dim, bias=True)
+        self.v_proj = nn.Linear(args.dim, kv_dim, bias=True)
         self.o_proj = nn.Linear(args.dim, args.dim, bias=False)
         
         self.rope = RotaryEmbedding(args)
@@ -100,11 +104,12 @@ class Attention(nn.Module):
 
     def forward(self, x: torch.Tensor, start_pos: int, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         B, T, C = x.size()
+        H = self.n_heads
         
         # Linear projections
-        q = self.q_proj(x).view(B, T, self.n_heads, self.head_dim)
-        k = self.k_proj(x).view(B, T, self.n_heads, self.head_dim)
-        v = self.v_proj(x).view(B, T, self.n_heads, self.head_dim)
+        q = self.q_proj(x).view(B, T, H, -1)  # [B, T, H, head_dim]
+        k = self.k_proj(x).view(B, T, H, 256)  # [B, T, H, 256]
+        v = self.v_proj(x).view(B, T, H, 256)  # [B, T, H, 256]
         
         # Apply rotary embeddings
         q = self.rope(q, start_pos)
