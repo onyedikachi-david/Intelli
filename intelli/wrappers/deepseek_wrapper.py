@@ -303,16 +303,19 @@ class DeepSeekWrapper:
 
 {prompt}
 
-Here's the implementation:
+Here's a clean and efficient implementation:
 
 ```python
-"""
+def"""
         else:
             formatted_prompt = prompt
             
         # Format as chat messages
         messages = [
-            {"role": "system", "content": "You are a helpful AI programming assistant. Write clean, efficient, and well-documented code."},
+            {
+                "role": "system", 
+                "content": "You are a helpful AI programming assistant. Write clean, efficient, and well-documented Python code. Always include docstrings and type hints."
+            },
             {"role": "user", "content": formatted_prompt}
         ]
         
@@ -323,6 +326,7 @@ Here's the implementation:
         # Track generated tokens for repetition penalty
         generated = []
         response_text = ""
+        consecutive_spaces = 0
         
         # Generate tokens
         print(f"\nGeneration started (max_length={self.max_length})...")
@@ -378,18 +382,27 @@ Here's the implementation:
                 token_text = self.tokenizer.decode([next_token.item()], skip_special_tokens=True)
                 if token_text:
                     response_text += token_text
+                    # Update consecutive spaces counter
+                    if token_text.isspace():
+                        consecutive_spaces += 1
+                    else:
+                        consecutive_spaces = 0
                     # Print progress with actual generated text
                     print(f"\rGenerated ({i+1} tokens): {response_text}", end="", flush=True)
                 
-                # Check for code block end or other stop conditions
+                # Check for stop conditions
                 if "```" in response_text and response_text.count("```") >= 2:
                     print("\nGeneration complete: Code block finished")
                     break
                 elif next_token.item() in [self.tokenizer.eos_token_id, self.tokenizer.user_token_id]:
                     print("\nGeneration complete: End token reached")
                     break
-                elif i >= 5 and all(c.isspace() for c in response_text[-5:]):
-                    print("\nGeneration complete: Multiple spaces detected")
+                elif consecutive_spaces >= 10:  # Increased threshold for consecutive spaces
+                    print("\nGeneration complete: Too many consecutive spaces")
+                    break
+                elif response_text.strip() and response_text.strip()[-1] == "}" and i > 50:
+                    # If we've generated a reasonable amount and hit a closing brace
+                    print("\nGeneration complete: Code block ended with closing brace")
                     break
         
         print("\n")  # New line after generation
@@ -403,8 +416,21 @@ Here's the implementation:
             # Extract code from markdown code block
             code = response_text.split("```python")[1].split("```")[0].strip()
             return code
+        elif "```" in response_text:
+            # Handle case where python marker is missing
+            code = response_text.split("```")[1].split("```")[0].strip()
+            return code
         else:
-            return response_text.strip()
+            # If no code block markers, try to extract code by indentation
+            lines = response_text.strip().split("\n")
+            code_lines = []
+            in_code = False
+            for line in lines:
+                if line.startswith("def ") or line.startswith("class "):
+                    in_code = True
+                if in_code and (line.strip() or line.startswith(" ")):
+                    code_lines.append(line)
+            return "\n".join(code_lines) if code_lines else response_text.strip()
     
     def __call__(self, prompt: str, **kwargs) -> str:
         """Alias for generate method."""

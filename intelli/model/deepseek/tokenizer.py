@@ -75,6 +75,17 @@ class DeepSeekTokenizer:
                     # Common types and modules
                     "object", "Exception", "TypeError", "ValueError", "RuntimeError",
                     "os", "sys", "math", "random", "datetime", "collections", "itertools",
+                    # Type hints
+                    "List", "Dict", "Set", "Tuple", "Optional", "Union", "Any", "Callable", "Iterator",
+                    "Generator", "Sequence", "Mapping", "Iterable", "TypeVar", "Generic",
+                    # Docstring markers
+                    '"""', "'''", "Args:", "Returns:", "Raises:", "Example:", "Note:", "See Also:",
+                    # Common code patterns
+                    "def fibonacci(", "def fib(", "def calculate_fibonacci(",
+                    "for i in range(", "while i < ", "if __name__ == '__main__':",
+                    # Common Python builtins
+                    "enumerate", "zip", "reversed", "isinstance", "hasattr", "getattr", "setattr",
+                    "property", "staticmethod", "classmethod", "super", "next", "iter",
                     # Add basic characters
                     *[chr(i) for i in range(ord('a'), ord('z')+1)],  # a-z
                     *[chr(i) for i in range(ord('A'), ord('Z')+1)],  # A-Z
@@ -99,7 +110,7 @@ class DeepSeekTokenizer:
                     '--model_type=unigram '
                     '--pad_id=0 --bos_id=1 --eos_id=2 --unk_id=3 '
                     '--control_symbols=<|user|>,<|assistant|>,<|system|> '
-                    '--user_defined_symbols=<s>,</s>,<pad>,```python,``` '
+                    '--user_defined_symbols=<s>,</s>,<pad>,```python,```,def,class '
                     '--treat_whitespace_as_suffix=true '
                     '--remove_extra_whitespaces=false '
                     '--byte_fallback=true '
@@ -110,7 +121,10 @@ class DeepSeekTokenizer:
                     '--split_by_unicode_script=false '
                     '--split_by_whitespace=true '
                     '--split_by_number=false '
-                    '--split_by_punctuation=false'
+                    '--split_by_punctuation=false '
+                    '--vocabulary_output_piece_score=true '
+                    '--num_threads=8 '
+                    '--train_extremely_large_corpus=true'
                 )
                 
                 # Clean up
