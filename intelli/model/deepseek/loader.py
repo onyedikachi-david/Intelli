@@ -133,26 +133,46 @@ class ModelLoader:
     def _init_mappings(self, model_path: str, prefetch: bool = True) -> None:
         """Initialize memory mappings for model files."""
         index_path = os.path.join(model_path, "model.safetensors.index.json")
-        with open(index_path) as f:
-            index = json.load(f)
+        
+        # Create or update index file
+        index = {
+            "metadata": {"total_size": 0},
+            "weight_map": {}
+        }
+        
+        # Find all safetensors files in the directory
+        for file in os.listdir(model_path):
+            if file.endswith(".safetensors"):
+                shard_name = os.path.basename(file)
+                # Add to weight map if not already present
+                if shard_name not in index["weight_map"].values():
+                    index["weight_map"][shard_name.replace(".safetensors", "")] = shard_name
+        
+        # Save updated index
+        with open(index_path, 'w') as f:
+            json.dump(index, f)
         
         # Create memory mappings for each shard
         for shard in set(index["weight_map"].values()):
             shard_path = os.path.join(model_path, shard)
-            self.mappings[shard] = ModelMapping(shard_path, prefetch)
+            if os.path.exists(shard_path):
+                self.mappings[shard] = ModelMapping(shard_path, prefetch)
             
         # Build tensor info
         for name, shard in index["weight_map"].items():
-            with safe_open(os.path.join(model_path, shard), framework="pt") as f:
-                tensor = f.get_tensor(name)
-                self.tensor_info[name] = TensorInfo(
-                    name=name,
-                    shape=tuple(tensor.shape),
-                    dtype=self._get_tensor_type(tensor.dtype),
-                    offset=f.get_tensor_info(name)["data_offsets"][0],
-                    file_idx=list(index["weight_map"].values()).index(shard)
-                )
-                self.size_data += np.prod(tensor.shape) * self._get_dtype_size(tensor.dtype)
+            shard_path = os.path.join(model_path, shard)
+            if os.path.exists(shard_path):
+                with safe_open(shard_path, framework="pt") as f:
+                    for tensor_name in f.keys():
+                        tensor = f.get_tensor(tensor_name)
+                        self.tensor_info[tensor_name] = TensorInfo(
+                            name=tensor_name,
+                            shape=tuple(tensor.shape),
+                            dtype=self._get_tensor_type(tensor.dtype),
+                            offset=f.get_tensor_info(tensor_name)["data_offsets"][0],
+                            file_idx=list(index["weight_map"].values()).index(shard)
+                        )
+                        self.size_data += np.prod(tensor.shape) * self._get_dtype_size(tensor.dtype)
     
     def _get_tensor_type(self, dtype: torch.dtype) -> TensorType:
         """Map PyTorch dtype to TensorType."""
