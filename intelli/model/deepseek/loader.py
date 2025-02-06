@@ -202,6 +202,7 @@ class ModelLoader:
     
     def _init_mappings(self, model_path: str) -> None:
         """Initialize memory mappings for model files."""
+        self.model_path = model_path  # Store model path for reference
         index_path = os.path.join(model_path, "model.safetensors.index.json")
         
         # Create or update index file
@@ -222,29 +223,34 @@ class ModelLoader:
         with open(index_path, 'w') as f:
             json.dump(index, f)
         
+        # Initialize safetensors header
+        self.safetensors_header = {}
+        
         # Create memory mappings for each shard
         for shard in set(index["weight_map"].values()):
             shard_path = os.path.join(model_path, shard)
             if os.path.exists(shard_path):
                 self.mappings[shard] = ModelMapping(shard_path, self.prefetch)
-            
-        # Build tensor info
-        for name, shard in index["weight_map"].items():
-            shard_path = os.path.join(model_path, shard)
-            if os.path.exists(shard_path):
+                # Load safetensors header for this shard
                 with safe_open(shard_path, framework="pt") as f:
                     metadata = f.metadata()
                     for tensor_name in f.keys():
                         tensor = f.get_tensor(tensor_name)
-                        # Get tensor offset from metadata
+                        # Get tensor info from metadata
                         tensor_info = metadata.get(tensor_name, {})
-                        offset = tensor_info.get("data_offsets", [0])[0] if tensor_info else 0
+                        self.safetensors_header[tensor_name] = {
+                            "dtype": str(tensor.dtype).replace("torch.", ""),
+                            "shape": tuple(tensor.shape),
+                            "data_offsets": tensor_info.get("data_offsets", [0]),
+                            "shard": shard
+                        }
                         
+                        # Store tensor info
                         self.tensor_info[tensor_name] = TensorInfo(
                             name=tensor_name,
                             shape=tuple(tensor.shape),
                             dtype=self._get_tensor_type(tensor.dtype),
-                            offset=offset,
+                            offset=tensor_info.get("data_offsets", [0])[0],
                             file_idx=list(index["weight_map"].values()).index(shard)
                         )
                         self.size_data += np.prod(tensor.shape) * self._get_dtype_size(tensor.dtype)
@@ -335,6 +341,41 @@ class ModelLoader:
             tensor, scale = act_quant(tensor, self.block_size)
             tensor.scale = scale  # Store scale for dequantization
         return tensor
+    
+    def _load_tensor_data(self, name: str, info: Dict[str, Any], dtype: torch.dtype) -> torch.Tensor:
+        """Load raw tensor data from file."""
+        shard = self.mappings[info["shard"]]
+        offset = info["data_offsets"][0]
+        
+        # Calculate tensor size
+        shape = info["shape"]
+        size = np.prod(shape) * self._get_dtype_size(dtype)
+        
+        # Read data from memory mapping
+        data = np.frombuffer(
+            shard.mm[offset:offset + size],
+            dtype=np.float32 if dtype == torch.float32 else np.float16
+        )
+        
+        # Convert to torch tensor
+        tensor = torch.from_numpy(data)
+        
+        # Convert dtype if needed
+        if dtype != tensor.dtype:
+            tensor = tensor.to(dtype)
+        
+        return tensor
+    
+    def _dtype_from_str(self, dtype_str: str) -> torch.dtype:
+        """Convert dtype string to torch dtype."""
+        dtype_map = {
+            "float32": torch.float32,
+            "float16": torch.float16,
+            "bfloat16": torch.bfloat16,
+            "int8": torch.int8,
+            "uint8": torch.uint8
+        }
+        return dtype_map.get(dtype_str, torch.float32)
     
     def load_model(self, model_path: str, device: str = "cuda",
                   quantize: bool = False, dtype: Optional[torch.dtype] = None,
