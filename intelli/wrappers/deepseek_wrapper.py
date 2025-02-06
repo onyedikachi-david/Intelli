@@ -84,138 +84,32 @@ class DeepSeekWrapper:
             dtype=self.dtype
         )
         
-        # Initialize model
+        # Initialize model with config from checkpoint
         self.config = model_data["config"]
         self.tokenizer = model_data["tokenizer"]
         
-        # Map config keys to expected names
-        config_mapping = {
-            'hidden_size': 'dim',
-            'num_hidden_layers': 'n_layers',
-            'num_attention_heads': 'n_heads',
-            'intermediate_size': 'inter_dim',
-            'max_sequence_length': 'max_seq_len'
-        }
-        
-        # Filter config to only include expected arguments
-        model_config = {}
-        expected_args = [
-            'dim', 'n_layers', 'n_heads', 'vocab_size', 'max_batch_size', 'max_seq_len',
-            'dtype', 'inter_dim', 'moe_inter_dim', 'n_dense_layers', 'n_routed_experts',
-            'n_shared_experts', 'n_activated_experts', 'n_expert_groups', 'n_limited_groups',
-            'score_func', 'route_scale', 'q_lora_rank', 'kv_lora_rank', 'qk_nope_head_dim',
-            'qk_rope_head_dim', 'v_head_dim', 'original_seq_len', 'rope_theta', 'rope_factor',
-            'beta_fast', 'beta_slow', 'mscale'
-        ]
-        
-        # First try direct mapping
-        for key in expected_args:
-            if key in self.config:
-                model_config[key] = self.config[key]
-            # Try mapped key names
-            elif key in config_mapping.values():
-                for old_key, new_key in config_mapping.items():
-                    if new_key == key and old_key in self.config:
-                        model_config[key] = self.config[old_key]
-        
-        # Update config for model size
-        if "model_type" in self.config:
-            if "70b" in self.model_variant.lower():
-                model_config.update({
-                    "dim": 8192,
-                    "n_layers": 80,
-                    "n_heads": 64,
-                    "vocab_size": 151936,
-                    "max_seq_len": 8192,
-                    "max_batch_size": 32,
-                    "inter_dim": 24576
-                })
-            elif "32b" in self.model_variant.lower():
-                model_config.update({
-                    "dim": 6144,
-                    "n_layers": 60,
-                    "n_heads": 48,
-                    "vocab_size": 151936,
-                    "max_seq_len": 8192,
-                    "max_batch_size": 32,
-                    "inter_dim": 18432
-                })
-            elif "14b" in self.model_variant.lower():
-                model_config.update({
-                    "dim": 5120,
-                    "n_layers": 40,
-                    "n_heads": 40,
-                    "vocab_size": 151936,
-                    "max_seq_len": 8192,
-                    "max_batch_size": 32,
-                    "inter_dim": 15360
-                })
-            elif "8b" in self.model_variant.lower() or "7b" in self.model_variant.lower():
-                model_config.update({
-                    "dim": 4096,
-                    "n_layers": 32,
-                    "n_heads": 32,
-                    "vocab_size": 151936,
-                    "max_seq_len": 8192,
-                    "max_batch_size": 32,
-                    "inter_dim": 12288
-                })
-            elif "1.5b" in self.model_variant.lower():
-                model_config.update({
-                    "dim": 2048,  # Hidden dimension
-                    "n_layers": 24,  # Number of layers
-                    "n_heads": 16,  # Number of attention heads
-                    "vocab_size": 76000,  # Vocabulary size
-                    "max_seq_len": 8192,
-                    "max_batch_size": 32,
-                    "inter_dim": 5440,  # MLP intermediate dimension
-                    "kv_lora_rank": 16,  # LoRA rank for key/value projections
-                    "qk_nope_head_dim": 128,
-                    "qk_rope_head_dim": 64,
-                    "v_head_dim": 128,
-                    "original_seq_len": 4096,
-                    "rope_theta": 10000.0,
-                    "rope_factor": 40,
-                    "beta_fast": 32,
-                    "beta_slow": 1,
-                    "mscale": 1.0
-                })
-        
-        # Set default values for missing arguments
-        defaults = {
-            'dtype': 'bf16',
+        # Create model args from config
+        model_args = {
+            'dim': self.config["hidden_size"],
+            'n_layers': self.config["num_hidden_layers"],
+            'n_heads': self.config["num_attention_heads"],
+            'vocab_size': self.config["vocab_size"],
+            'max_seq_len': self.config["max_sequence_length"],
             'max_batch_size': 32,
-            'max_seq_len': 8192,
-            'inter_dim': 5440,  # MLP intermediate dimension
-            'moe_inter_dim': 1408,
-            'n_dense_layers': 1,
-            'n_routed_experts': 64,
-            'n_shared_experts': 2,
-            'n_activated_experts': 6,
-            'n_expert_groups': 1,
-            'n_limited_groups': 1,
-            'score_func': 'softmax',
-            'route_scale': 1.0,
-            'q_lora_rank': 0,
-            'kv_lora_rank': 16,  # LoRA rank for key/value projections
-            'qk_nope_head_dim': 128,
-            'qk_rope_head_dim': 64,
-            'v_head_dim': 128,
-            'original_seq_len': 4096,
+            'inter_dim': self.config["intermediate_size"],
+            'dtype': self.dtype,
             'rope_theta': 10000.0,
             'rope_factor': 40,
             'beta_fast': 32,
             'beta_slow': 1,
             'mscale': 1.0
         }
-        for key, value in defaults.items():
-            if key not in model_config:
-                model_config[key] = value
         
-        args = ModelArgs(**model_config)
+        # Initialize model with args from checkpoint
+        args = ModelArgs(**model_args)
         self.model = Transformer(args).to(self.device)
         
-        # Convert state dict
+        # Load state dict
         state_dict = {}
         for key, tensor in model_data["weights"].items():
             if isinstance(tensor, LazyTensor):
@@ -223,51 +117,7 @@ class DeepSeekWrapper:
             # Remove "model." prefix from key
             if key.startswith("model."):
                 key = key[6:]  # Remove "model." prefix
-            
-            # Handle key/value projection weights
-            if 'k_proj.weight' in key or 'v_proj.weight' in key:
-                # Get layer number from key
-                layer_num = int(key.split('.')[1])
-                base_key = key.replace('k_proj', 'k_proj_a').replace('v_proj', 'v_proj_a')
-                
-                # Reshape weight for model parallel sharding
-                weight = tensor.view(-1, args.dim)  # Reshape to 2D first
-                
-                # Split into 8 shards
-                mp_size = 8
-                shard_size = weight.size(0) // mp_size
-                weight = weight.view(mp_size, shard_size, args.dim)  # [8, shard_size, dim]
-                
-                # Add each shard to state dict
-                for i in range(mp_size):
-                    shard_key = f"{base_key[:-7]}.{i}.weight"  # Replace .weight with shard index
-                    state_dict[shard_key] = weight[i].contiguous()
-                
-                # Add proj_b weights (shared across shards)
-                proj_b_key = key.replace('k_proj', 'k_proj_b').replace('v_proj', 'v_proj_b')
-                state_dict[proj_b_key] = torch.eye(
-                    args.dim,
-                    shard_size,  # Use shard_size instead of lora_rank
-                    device=tensor.device,
-                    dtype=tensor.dtype
-                )
-            # Handle key/value projection biases
-            elif 'k_proj.bias' in key or 'v_proj.bias' in key:
-                # Get layer number from key
-                layer_num = int(key.split('.')[1])
-                base_key = key.replace('k_proj', 'k_proj_a').replace('v_proj', 'v_proj_a')
-                
-                # Split bias into shards
-                mp_size = 8
-                shard_size = tensor.size(0) // mp_size
-                bias = tensor.view(mp_size, shard_size)  # [8, shard_size]
-                
-                # Add each shard to state dict
-                for i in range(mp_size):
-                    bias_key = f"{base_key[:-5]}.{i}.bias"  # Replace .bias with shard index
-                    state_dict[bias_key] = bias[i].contiguous()
-            else:
-                state_dict[key] = tensor
+            state_dict[key] = tensor
         
         # Load state dict
         self.model.load_state_dict(state_dict)
