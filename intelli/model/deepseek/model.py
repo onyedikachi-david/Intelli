@@ -134,14 +134,14 @@ class Attention(nn.Module):
             for _ in range(self.mp_size)
         ])
         # Note: k_proj_b takes input of size shard_size and outputs hidden_size
-        self.k_proj_b = nn.Linear(self.lora_rank, self.hidden_size, bias=False)
+        self.k_proj_b = nn.Linear(self.shard_size, self.hidden_size, bias=False)
         
         self.v_proj_a = nn.ModuleList([
             nn.Linear(self.hidden_size, self.shard_size, bias=True)
             for _ in range(self.mp_size)
         ])
         # Note: v_proj_b takes input of size shard_size and outputs hidden_size
-        self.v_proj_b = nn.Linear(self.lora_rank, self.hidden_size, bias=False)
+        self.v_proj_b = nn.Linear(self.shard_size, self.hidden_size, bias=False)
         
         self.o_proj = nn.Linear(self.hidden_size, self.hidden_size, bias=False)
         
@@ -151,71 +151,6 @@ class Attention(nn.Module):
         # Apply extended context scaling if needed
         if args.max_seq_len > args.original_seq_len:
             self.scale *= args.mscale
-
-    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs):
-        """Custom state dict loading to handle model parallel sharding."""
-        # Handle key projection weights and biases
-        k_proj_weight = state_dict.pop(prefix + 'k_proj.weight', None)
-        k_proj_bias = state_dict.pop(prefix + 'k_proj.bias', None)
-        
-        if k_proj_weight is not None:
-            # Reshape weight for model parallel sharding
-            weight = k_proj_weight.view(self.lora_rank, self.hidden_size)  # [256, 1536]
-            
-            # Split into 8 shards
-            weight = weight.view(self.mp_size, self.shard_size, self.hidden_size)  # [8, 32, 1536]
-            
-            # Add each shard to state dict
-            for i in range(self.mp_size):
-                state_dict[f"{prefix}k_proj_a.{i}.weight"] = weight[i].contiguous()
-            
-            # Add proj_b weights (shared across shards)
-            state_dict[f"{prefix}k_proj_b.weight"] = torch.eye(
-                self.hidden_size,
-                self.shard_size,
-                device=k_proj_weight.device,
-                dtype=k_proj_weight.dtype
-            )
-            
-            # Handle biases
-            if k_proj_bias is not None:
-                # Split bias into shards
-                bias = k_proj_bias.view(self.mp_size, self.shard_size)  # [8, 32]
-                for i in range(self.mp_size):
-                    state_dict[f"{prefix}k_proj_a.{i}.bias"] = bias[i].contiguous()
-        
-        # Handle value projection weights and biases
-        v_proj_weight = state_dict.pop(prefix + 'v_proj.weight', None)
-        v_proj_bias = state_dict.pop(prefix + 'v_proj.bias', None)
-        
-        if v_proj_weight is not None:
-            # Reshape weight for model parallel sharding
-            weight = v_proj_weight.view(self.lora_rank, self.hidden_size)  # [256, 1536]
-            
-            # Split into 8 shards
-            weight = weight.view(self.mp_size, self.shard_size, self.hidden_size)  # [8, 32, 1536]
-            
-            # Add each shard to state dict
-            for i in range(self.mp_size):
-                state_dict[f"{prefix}v_proj_a.{i}.weight"] = weight[i].contiguous()
-            
-            # Add proj_b weights (shared across shards)
-            state_dict[f"{prefix}v_proj_b.weight"] = torch.eye(
-                self.hidden_size,
-                self.shard_size,
-                device=v_proj_weight.device,
-                dtype=v_proj_weight.dtype
-            )
-            
-            # Handle biases
-            if v_proj_bias is not None:
-                # Split bias into shards
-                bias = v_proj_bias.view(self.mp_size, self.shard_size)  # [8, 32]
-                for i in range(self.mp_size):
-                    state_dict[f"{prefix}v_proj_a.{i}.bias"] = bias[i].contiguous()
-        
-        # Let parent class handle the rest
-        super()._load_from_state_dict(state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs)
 
     def forward(self, x: torch.Tensor, start_pos: int, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         B, T, C = x.size()
@@ -231,9 +166,14 @@ class Attention(nn.Module):
             k_shard = self.k_proj_a[i](x)  # [B, T, shard_size]
             k_shards.append(k_shard)
         k = torch.cat(k_shards, dim=-1)  # [B, T, lora_rank]
-        k = k.transpose(-1, -2)  # [B, lora_rank, T]
-        k = self.k_proj_b(k)  # [B, hidden_size, T]
-        k = k.transpose(-1, -2)  # [B, T, hidden_size]
+        # Process each shard separately to maintain dimensions
+        k_shards = k.view(B, T, self.mp_size, self.shard_size)  # [B, T, 8, 32]
+        k_shards = k_shards.permute(0, 2, 1, 3)  # [B, 8, T, 32]
+        k_outs = []
+        for i in range(self.mp_size):
+            k_out = self.k_proj_b(k_shards[:, i])  # [B, T, hidden_size]
+            k_outs.append(k_out)
+        k = torch.stack(k_outs, dim=1).mean(dim=1)  # [B, T, hidden_size]
         k = k.view(B, T, H, -1)  # [B, T, H, head_dim]
         
         # Value projection with LoRA and model parallel
@@ -242,9 +182,14 @@ class Attention(nn.Module):
             v_shard = self.v_proj_a[i](x)  # [B, T, shard_size]
             v_shards.append(v_shard)
         v = torch.cat(v_shards, dim=-1)  # [B, T, lora_rank]
-        v = v.transpose(-1, -2)  # [B, lora_rank, T]
-        v = self.v_proj_b(v)  # [B, hidden_size, T]
-        v = v.transpose(-1, -2)  # [B, T, hidden_size]
+        # Process each shard separately to maintain dimensions
+        v_shards = v.view(B, T, self.mp_size, self.shard_size)  # [B, T, 8, 32]
+        v_shards = v_shards.permute(0, 2, 1, 3)  # [B, 8, T, 32]
+        v_outs = []
+        for i in range(self.mp_size):
+            v_out = self.v_proj_b(v_shards[:, i])  # [B, T, hidden_size]
+            v_outs.append(v_out)
+        v = torch.stack(v_outs, dim=1).mean(dim=1)  # [B, T, hidden_size]
         v = v.view(B, T, H, -1)  # [B, T, H, head_dim]
         
         # Apply rotary embeddings

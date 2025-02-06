@@ -238,7 +238,7 @@ class DeepSeekWrapper:
                 proj_b_key = key.replace('k_proj', 'k_proj_b').replace('v_proj', 'v_proj_b')
                 state_dict[proj_b_key] = torch.eye(
                     args.dim,
-                    shard_size,
+                    shard_size,  # Use shard_size instead of lora_rank
                     device=tensor.device,
                     dtype=tensor.dtype
                 )
