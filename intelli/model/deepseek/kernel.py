@@ -108,87 +108,6 @@ def act_quant(x: torch.Tensor, block_size: int = 128) -> Tuple[torch.Tensor, tor
     return y.view_as(x), s.view(*x.size()[:-1], -1)
 
 
-# Optimized GEMM configurations
-fp8_gemm_configs = [
-    triton.Config({'BLOCK_SIZE_M': block_m, 'BLOCK_SIZE_N': block_n, 'BLOCK_SIZE_K': 128}, 
-           num_stages=num_stages, num_warps=8)
-    for block_m in [16, 32, 64] 
-    for block_n in [32, 64, 128] 
-    for num_stages in [3, 4, 5, 6]
-]
-
-
-@triton.autotune(configs=fp8_gemm_configs, key=['N', 'K'])
-@triton.jit
-def fp8_gemm_kernel(a_ptr, b_ptr, c_ptr, a_s_ptr, b_s_ptr, M, N: tl.constexpr, K: tl.constexpr,
-                   BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_K: tl.constexpr):
-    """
-    Optimized matrix multiplication for FP8 tensors.
-    
-    Args:
-        a_ptr: Pointer to first input matrix
-        b_ptr: Pointer to second input matrix
-        c_ptr: Pointer to output matrix
-        a_s_ptr: Pointer to scaling factors for first matrix
-        b_s_ptr: Pointer to scaling factors for second matrix
-        M: First matrix rows
-        N: Second matrix columns
-        K: Common dimension
-        BLOCK_SIZE_*: Block sizes for tiling
-    """
-    pid_m = tl.program_id(axis=0)
-    pid_n = tl.program_id(axis=1)
-    k = tl.cdiv(K, BLOCK_SIZE_K)
-    offs_m = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
-    offs_n = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
-    offs_k = tl.arange(0, BLOCK_SIZE_K)
-    
-    a_ptrs = a_ptr + offs_m[:, None] * K + offs_k[None, :]
-    b_ptrs = b_ptr + offs_n[None, :] * K + offs_k[:, None]
-    a_s_ptrs = a_s_ptr + offs_m * k
-    b_s_ptrs = b_s_ptr + (offs_n // BLOCK_SIZE_K) * k
-    
-    accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
-    
-    for i in range(k):
-        a = tl.load(a_ptrs, mask=offs_k[None, :] < K - i * BLOCK_SIZE_K, other=0.0)
-        b = tl.load(b_ptrs, mask=offs_k[:, None] < K - i * BLOCK_SIZE_K, other=0.0)
-        a_s = tl.load(a_s_ptrs)
-        b_s = tl.load(b_s_ptrs)
-        accumulator += tl.dot(a, b) * a_s[:, None] * b_s[None, :]
-        a_ptrs += BLOCK_SIZE_K
-        b_ptrs += BLOCK_SIZE_K
-        a_s_ptrs += 1
-        b_s_ptrs += 1
-        
-    c = accumulator.to(c_ptr.dtype.element_ty)
-    offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
-    offs_n = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-    c_ptrs = c_ptr + offs_m[:, None] * N + offs_n[None, :]
-    mask = (offs_m[:, None] < M) & (offs_n[None, :] < N)
-    tl.store(c_ptrs, c, mask=mask)
-
-
-def fp8_gemm(a: torch.Tensor, a_s: torch.Tensor, b: torch.Tensor, b_s: torch.Tensor) -> torch.Tensor:
-    """
-    Performs matrix multiplication using FP8 precision.
-    Falls back to PyTorch implementation on non-Linux platforms.
-    
-    Args:
-        a: First input matrix
-        a_s: Scaling factors for first matrix
-        b: Second input matrix
-        b_s: Scaling factors for second matrix
-        
-    Returns:
-        Result of matrix multiplication
-    """
-    # PyTorch implementation
-    a_dequant = weight_dequant(a, a_s)
-    b_dequant = weight_dequant(b, b_s)
-    return torch.matmul(a_dequant, b_dequant)
-
-
 # CPU implementations
 def act_quant_cpu(x, scale):
     return torch.round(x / scale) * scale
@@ -241,6 +160,15 @@ def fp8_gemm(a, b):
 
 # Only define Triton kernels if CUDA is available
 if USE_TRITON:
+    # Optimized GEMM configurations
+    fp8_gemm_configs = [
+        triton.Config({'BLOCK_SIZE_M': block_m, 'BLOCK_SIZE_N': block_n, 'BLOCK_SIZE_K': 128}, 
+               num_stages=num_stages, num_warps=8)
+        for block_m in [16, 32, 64] 
+        for block_n in [32, 64, 128] 
+        for num_stages in [3, 4, 5, 6]
+    ]
+
     @triton.jit
     def act_quant_kernel(x_ptr, scale, n_elements, BLOCK_SIZE: tl.constexpr):
         pid = tl.program_id(0)
