@@ -90,9 +90,8 @@ class Attention(nn.Module):
         self.q_proj = nn.Linear(args.dim, args.dim, bias=True)
         
         # Key and Value use reduced dimension (256 per head)
-        kv_dim = 256 * args.n_heads
-        self.k_proj = nn.Linear(args.dim, kv_dim, bias=True)
-        self.v_proj = nn.Linear(args.dim, kv_dim, bias=True)
+        self.k_proj = nn.Linear(args.dim, 256 * self.n_heads, bias=True)
+        self.v_proj = nn.Linear(args.dim, 256 * self.n_heads, bias=True)
         self.o_proj = nn.Linear(args.dim, args.dim, bias=False)
         
         self.rope = RotaryEmbedding(args)
