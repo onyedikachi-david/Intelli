@@ -119,12 +119,10 @@ class Attention(nn.Module):
         self.n_heads = args.n_heads
         self.head_dim = args.dim // args.n_heads
         
-        # Query uses full dimension
+        # All projections use the same dimension
         self.q_proj = nn.Linear(args.dim, args.dim, bias=True)
-        
-        # Key and Value use reduced dimension (256 total, not per head)
-        self.k_proj = nn.Linear(args.dim, 256, bias=True)
-        self.v_proj = nn.Linear(args.dim, 256, bias=True)
+        self.k_proj = nn.Linear(args.dim, args.dim, bias=True)
+        self.v_proj = nn.Linear(args.dim, args.dim, bias=True)
         self.o_proj = nn.Linear(args.dim, args.dim, bias=False)
         
         self.rope = RotaryEmbedding(args)
@@ -140,23 +138,32 @@ class Attention(nn.Module):
     def forward(self, x: torch.Tensor, start_pos: int, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         B, T, C = x.size()
         H = self.n_heads
+        HD = self.head_dim
         
-        # Linear projections
-        q = self.q_proj(x).view(B, T, H, -1)  # [B, T, H, head_dim]
-        k = self.k_proj(x).view(B, T, 1, 256).expand(B, T, H, 256)  # [B, T, H, 256]
-        v = self.v_proj(x).view(B, T, 1, 256).expand(B, T, H, 256)  # [B, T, H, 256]
+        # Linear projections with consistent dimensions
+        q = self.q_proj(x).view(B, T, H, HD)  # [B, T, H, head_dim]
+        k = self.k_proj(x).view(B, T, H, HD)  # [B, T, H, head_dim]
+        v = self.v_proj(x).view(B, T, H, HD)  # [B, T, H, head_dim]
         
-        # Apply rotary embeddings only to the query projection
-        # Reshape query to match RoPE dimensions
-        q_rope_dim = min(q.shape[-1], self.rope_dim * 2)  # Ensure we don't exceed tensor dimensions
-        q_rope = q[..., :q_rope_dim].view(B, T, H, -1)  # [B, T, H, rope_dim*2]
-        q_rope = self.rope(q_rope, start_pos)  # Apply RoPE
+        # Apply rotary embeddings only to the query and key projections
+        q_rope_dim = min(HD, self.rope_dim * 2)  # Ensure we don't exceed tensor dimensions
+        k_rope_dim = q_rope_dim  # Same dimension for key
         
-        # Concatenate with remaining dimensions if any
-        if q.shape[-1] > q_rope_dim:
+        # Apply RoPE to query
+        q_rope = q[..., :q_rope_dim]
+        q_rope = self.rope(q_rope, start_pos)
+        if HD > q_rope_dim:
             q = torch.cat([q_rope, q[..., q_rope_dim:]], dim=-1)
         else:
             q = q_rope
+            
+        # Apply RoPE to key
+        k_rope = k[..., :k_rope_dim]
+        k_rope = self.rope(k_rope, start_pos)
+        if HD > k_rope_dim:
+            k = torch.cat([k_rope, k[..., k_rope_dim:]], dim=-1)
+        else:
+            k = k_rope
         
         # Compute attention
         attn = torch.einsum("bthd,bshd->bhts", q, k) * self.scale
