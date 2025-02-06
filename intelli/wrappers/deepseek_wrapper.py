@@ -88,25 +88,72 @@ class DeepSeekWrapper:
         self.config = model_data["config"]
         self.tokenizer = model_data["tokenizer"]
         
+        # Filter config to only include expected arguments
+        model_config = {}
+        expected_args = [
+            'dim', 'n_layers', 'n_heads', 'n_kv_heads', 'vocab_size', 'multiple_of',
+            'ffn_dim_multiplier', 'norm_eps', 'max_batch_size', 'max_seq_len'
+        ]
+        for key in expected_args:
+            if key in self.config:
+                model_config[key] = self.config[key]
+        
         # Update config for model size
         if "model_type" in self.config:
             if "70b" in self.model_variant.lower():
-                self.config["dim"] = 8192
-                self.config["n_layers"] = 80
+                model_config.update({
+                    "dim": 8192,
+                    "n_layers": 80,
+                    "n_heads": 64,
+                    "n_kv_heads": 8,
+                    "vocab_size": 32000
+                })
             elif "32b" in self.model_variant.lower():
-                self.config["dim"] = 6144
-                self.config["n_layers"] = 60
+                model_config.update({
+                    "dim": 6144,
+                    "n_layers": 60,
+                    "n_heads": 48,
+                    "n_kv_heads": 8,
+                    "vocab_size": 32000
+                })
             elif "14b" in self.model_variant.lower():
-                self.config["dim"] = 5120
-                self.config["n_layers"] = 40
+                model_config.update({
+                    "dim": 5120,
+                    "n_layers": 40,
+                    "n_heads": 40,
+                    "n_kv_heads": 8,
+                    "vocab_size": 32000
+                })
             elif "8b" in self.model_variant.lower() or "7b" in self.model_variant.lower():
-                self.config["dim"] = 4096
-                self.config["n_layers"] = 32
+                model_config.update({
+                    "dim": 4096,
+                    "n_layers": 32,
+                    "n_heads": 32,
+                    "n_kv_heads": 8,
+                    "vocab_size": 32000
+                })
             elif "1.5b" in self.model_variant.lower():
-                self.config["dim"] = 2048
-                self.config["n_layers"] = 24
+                model_config.update({
+                    "dim": 2048,
+                    "n_layers": 24,
+                    "n_heads": 16,
+                    "n_kv_heads": 8,
+                    "vocab_size": 32000
+                })
         
-        args = ModelArgs(**self.config)
+        # Set default values for missing arguments
+        defaults = {
+            'multiple_of': 256,
+            'ffn_dim_multiplier': None,
+            'norm_eps': 1e-5,
+            'max_batch_size': 32,
+            'max_seq_len': 8192
+        }
+        for key, value in defaults.items():
+            if key not in model_config:
+                model_config[key] = value
+        
+        args = ModelArgs(**model_config)
         self.model = Transformer(args).to(self.device)
         
         # Load weights
