@@ -95,15 +95,14 @@ class RotaryEmbedding(nn.Module):
         cos = torch.cos(freqs)  # [seq_len, dim/2]
         sin = torch.sin(freqs)  # [seq_len, dim/2]
         
-        # Ensure input tensor has correct shape
-        x = x.view(*x.shape[:-1], -1, 2)  # [..., dim/2, 2]
-        
         # Reshape cos and sin for broadcasting
-        cos = cos.view(1, seq_len, 1, -1)  # [1, seq_len, 1, dim/2]
-        sin = sin.view(1, seq_len, 1, -1)  # [1, seq_len, 1, dim/2]
+        cos = cos.view(1, seq_len, 1, cos.shape[-1])  # [1, seq_len, 1, dim/2]
+        sin = sin.view(1, seq_len, 1, sin.shape[-1])  # [1, seq_len, 1, dim/2]
         
-        # Split input into half for rotation
-        x1, x2 = x.unbind(-1)  # [..., dim/2], [..., dim/2]
+        # Ensure input tensor has correct shape by splitting last dimension
+        x_shape = x.shape
+        x_reshaped = x.view(x_shape[0], x_shape[1], x_shape[2], -1, 2)
+        x1, x2 = x_reshaped[..., 0], x_reshaped[..., 1]
         
         # Apply rotation using the RoPE formulation
         rotated = torch.cat([
@@ -149,9 +148,9 @@ class Attention(nn.Module):
         v = self.v_proj(x).view(B, T, 1, 256).expand(B, T, H, 256)  # [B, T, H, 256]
         
         # Apply rotary embeddings only to the query projection
-        # Reshape query to match RoPE dimensions
-        q_rope_dim = min(q.shape[-1], self.rope_dim * 2)  # Ensure we don't exceed tensor dimensions
-        q_rope = q[..., :q_rope_dim].view(B, T, H, -1)  # [B, T, H, rope_dim*2]
+        # Ensure q_rope has correct dimensions for RoPE
+        q_rope_dim = self.rope_dim * 2  # Multiply by 2 since we need pairs for rotation
+        q_rope = q[..., :q_rope_dim]  # [B, T, H, rope_dim*2]
         q_rope = self.rope(q_rope, start_pos)  # Apply RoPE
         
         # Concatenate with remaining dimensions if any
