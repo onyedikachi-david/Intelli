@@ -3,6 +3,8 @@ import os
 import torch
 import warnings
 from intelli.wrappers.deepseek_wrapper import DeepSeekWrapper, DeepSeekVariant
+from intelli.model.deepseek.loader import ModelLoader
+from intelli.model.deepseek.model import ModelArgs
 
 
 def get_available_memory():
@@ -171,6 +173,148 @@ class TestDeepSeekWrapper(unittest.TestCase):
         """Clean up after each test."""
         del self.wrapper
         torch.cuda.empty_cache()
+
+
+@pytest.fixture
+def model_loader():
+    """Create a model loader instance."""
+    return ModelLoader()
+
+
+@pytest.fixture
+def model_args():
+    """Create model arguments for testing."""
+    return ModelArgs(
+        max_batch_size=1,
+        max_seq_len=512,
+        dtype="bf16",
+        vocab_size=32000,
+        dim=1024,
+        inter_dim=4096,
+        n_layers=12,
+        n_heads=16
+    )
+
+
+def test_model_loader_initialization(model_loader):
+    """Test model loader initialization."""
+    assert model_loader.cache_dir is not None
+    assert model_loader.block_size == 128
+    assert model_loader.use_mmap is True
+    assert model_loader.prefetch is True
+    assert model_loader.quantize is False
+    assert model_loader.dtype == torch.bfloat16
+
+
+def test_model_download(model_loader):
+    """Test model downloading from HuggingFace."""
+    model_path = model_loader.download_from_hf("deepseek-ai/deepseek-v3-7b")
+    assert os.path.exists(model_path)
+    assert os.path.exists(os.path.join(model_path, "config.json"))
+    assert os.path.exists(os.path.join(model_path, "model.safetensors"))
+
+
+def test_model_loading(model_loader):
+    """Test model loading with memory optimizations."""
+    # Download a small model for testing
+    model_path = model_loader.download_from_hf("deepseek-ai/deepseek-v3-7b")
+    
+    # Test loading without quantization
+    tensors = model_loader.load_model(
+        model_path=model_path,
+        device="cuda" if torch.cuda.is_available() else "cpu",
+        quantize=False
+    )
+    assert isinstance(tensors, dict)
+    assert len(tensors) > 0
+    
+    # Test loading with quantization
+    model_loader.quantize = True
+    tensors = model_loader.load_model(
+        model_path=model_path,
+        device="cuda" if torch.cuda.is_available() else "cpu",
+        quantize=True
+    )
+    assert isinstance(tensors, dict)
+    assert len(tensors) > 0
+    
+    # Verify tensor dtypes
+    for tensor in tensors.values():
+        if model_loader.quantize:
+            assert tensor.dtype in [torch.float8_e4m3fn, torch.float16]
+        else:
+            assert tensor.dtype == torch.bfloat16
+
+
+def test_memory_mapping(model_loader):
+    """Test memory mapping functionality."""
+    model_path = model_loader.download_from_hf("deepseek-ai/deepseek-v3-7b")
+    
+    # Initialize mappings
+    model_loader._init_mappings(model_path)
+    
+    # Verify mappings are created
+    assert len(model_loader.mappings) > 0
+    assert len(model_loader.tensor_info) > 0
+    
+    # Test memory efficiency
+    initial_memory = torch.cuda.memory_allocated() if torch.cuda.is_available() else 0
+    tensors = model_loader.load_model(
+        model_path=model_path,
+        device="cuda" if torch.cuda.is_available() else "cpu"
+    )
+    final_memory = torch.cuda.memory_allocated() if torch.cuda.is_available() else 0
+    
+    # Memory usage should be reasonable
+    if torch.cuda.is_available():
+        memory_increase = (final_memory - initial_memory) / 1024 / 1024  # MB
+        assert memory_increase < 1000  # Less than 1GB increase
+
+
+def test_quantization(model_loader):
+    """Test quantization functionality."""
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+    
+    model_path = model_loader.download_from_hf("deepseek-ai/deepseek-v3-7b")
+    
+    # Test FP8 quantization
+    model_loader.quantize = True
+    model_loader.dtype = torch.float8_e4m3fn
+    tensors = model_loader.load_model(
+        model_path=model_path,
+        device="cuda",
+        quantize=True
+    )
+    
+    # Verify quantized tensors
+    for tensor in tensors.values():
+        if hasattr(tensor, 'scale'):
+            assert tensor.dtype == torch.float8_e4m3fn
+            assert tensor.scale is not None
+
+
+def test_progress_callback(model_loader):
+    """Test progress callback functionality."""
+    progress_values = []
+    
+    def progress_callback(progress):
+        progress_values.append(progress)
+    
+    model_path = model_loader.download_from_hf("deepseek-ai/deepseek-v3-7b")
+    
+    # Load model with progress tracking
+    model_loader.load_model(
+        model_path=model_path,
+        device="cuda" if torch.cuda.is_available() else "cpu",
+        progress_callback=progress_callback
+    )
+    
+    # Verify progress tracking
+    assert len(progress_values) > 0
+    assert min(progress_values) >= 0
+    assert max(progress_values) <= 1
+    assert sorted(progress_values) == progress_values  # Values should be monotonically increasing
 
 
 if __name__ == "__main__":

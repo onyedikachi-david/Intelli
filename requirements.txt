@@ -11,3 +11,7 @@ numpy>=1.24.0
 
 # Optional dependencies (Linux only)
 triton>=3.2.0; platform_system == "Linux"
+
+# Added from the code block
+huggingface-hub>=0.16.0
+pytest>=7.0.0

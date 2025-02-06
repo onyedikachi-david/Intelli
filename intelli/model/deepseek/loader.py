@@ -12,6 +12,7 @@ from safetensors.torch import safe_open
 from huggingface_hub import hf_hub_download
 
 from .tokenizer import DeepSeekTokenizer
+from .kernel import act_quant, weight_dequant, fp8_gemm
 
 
 class TensorType(Enum):
@@ -71,6 +72,11 @@ class ModelLoader:
         self.tensor_info: Dict[str, TensorInfo] = {}
         self.size_data = 0
         self.size_done = 0
+        self.block_size = 128  # For quantization
+        self.use_mmap = True  # Default to using memory mapping
+        self.prefetch = True  # Default to prefetching
+        self.quantize = False  # Default to no quantization
+        self.dtype = torch.bfloat16  # Default dtype
     
     def _download_file(self, url: str, local_path: str) -> None:
         """Download file with progress bar."""
@@ -194,7 +200,7 @@ class ModelLoader:
         
         return model_dir
     
-    def _init_mappings(self, model_path: str, prefetch: bool = True) -> None:
+    def _init_mappings(self, model_path: str) -> None:
         """Initialize memory mappings for model files."""
         index_path = os.path.join(model_path, "model.safetensors.index.json")
         
@@ -220,7 +226,7 @@ class ModelLoader:
         for shard in set(index["weight_map"].values()):
             shard_path = os.path.join(model_path, shard)
             if os.path.exists(shard_path):
-                self.mappings[shard] = ModelMapping(shard_path, prefetch)
+                self.mappings[shard] = ModelMapping(shard_path, self.prefetch)
             
         # Build tensor info
         for name, shard in index["weight_map"].items():
@@ -251,6 +257,8 @@ class ModelLoader:
             return TensorType.F16
         elif dtype == torch.int8:
             return TensorType.Q8_0
+        elif dtype == torch.quint4x2:
+            return TensorType.Q4_0
         else:
             return TensorType.F32
     
@@ -258,90 +266,77 @@ class ModelLoader:
         """Get size in bytes for dtype."""
         if dtype == torch.float32:
             return 4
-        elif dtype == torch.float16:
+        elif dtype == torch.float16 or dtype == torch.bfloat16:
             return 2
         elif dtype == torch.int8:
             return 1
+        elif dtype == torch.quint4x2:
+            return 0.5
         else:
             return 4
     
-    def _load_tensor(self, name: str, device: str, dtype: Optional[torch.dtype] = None) -> torch.Tensor:
-        """Load a single tensor from memory mapping."""
+    def _load_tensor(self, name: str, device: str = "cuda") -> torch.Tensor:
+        """Load a tensor from memory mapping."""
         info = self.tensor_info[name]
         shard = list(self.mappings.values())[info.file_idx]
         
-        # Get tensor data from memory mapping
-        tensor_size = np.prod(info.shape) * self._get_dtype_size(dtype or torch.float32)
-        tensor_data = memoryview(shard.mm[info.offset:info.offset + tensor_size])
+        # Read tensor data from memory mapping
+        tensor_size = np.prod(info.shape) * self._get_dtype_size(self.dtype)
+        tensor_data = np.frombuffer(
+            shard.mm[info.offset:info.offset + tensor_size],
+            dtype=np.float32 if info.dtype == TensorType.F32 else np.float16
+        ).reshape(info.shape)
         
-        # Convert to tensor
-        tensor = torch.frombuffer(tensor_data, dtype=dtype or torch.float32)
-        tensor = tensor.reshape(info.shape)
+        # Convert to torch tensor
+        tensor = torch.from_numpy(tensor_data).to(device)
         
-        # Quantize if needed
-        if info.dtype in [TensorType.Q8_0, TensorType.Q4_0, TensorType.Q4_1]:
-            tensor = self._quantize_tensor(tensor, info.dtype)
+        # Apply quantization if enabled
+        if self.quantize and info.dtype not in [TensorType.Q8_0, TensorType.Q4_0, TensorType.Q4_1]:
+            tensor = self._quantize_tensor(tensor)
         
-        return tensor.to(device=device)
+        return tensor
     
-    def _quantize_tensor(self, tensor: torch.Tensor, qtype: TensorType) -> torch.Tensor:
-        """Quantize tensor to specified type."""
-        if qtype == TensorType.Q8_0:
-            # Simple 8-bit quantization
-            scale = tensor.abs().max() / 127
-            return torch.round(tensor / scale).to(torch.int8) * scale
-        elif qtype in [TensorType.Q4_0, TensorType.Q4_1]:
-            # 4-bit quantization (simplified)
-            scale = tensor.abs().max() / 7
-            return torch.round(tensor / scale).clamp(-7, 7).to(torch.int8) * scale
+    def _quantize_tensor(self, tensor: torch.Tensor) -> torch.Tensor:
+        """Quantize a tensor using block-wise quantization."""
+        if tensor.element_size() > 2:  # Only quantize fp32/fp16 tensors
+            tensor, scale = act_quant(tensor, self.block_size)
+            tensor.scale = scale  # Store scale for dequantization
         return tensor
     
     def load_model(self, model_path: str, device: str = "cuda",
                   quantize: bool = False, dtype: Optional[torch.dtype] = None,
                   progress_callback: Optional[callable] = None) -> Dict[str, Any]:
         """
-        Load model with memory optimizations.
+        Load model weights with memory optimizations.
         
         Args:
             model_path: Path to model directory
-            device: Device to load model on
-            quantize: Whether to quantize the model
-            dtype: Data type for model weights
-            progress_callback: Optional callback for loading progress
+            device: Device to load tensors to
+            quantize: Whether to use quantization
+            dtype: Data type for tensors
+            progress_callback: Optional callback for progress updates
             
         Returns:
-            Dictionary containing model components
+            Dictionary of model tensors
         """
-        # Initialize mappings
-        self._init_mappings(model_path, prefetch=True)
+        self.quantize = quantize
+        self.dtype = dtype or self.dtype
         
-        # Load config and tokenizer
-        with open(os.path.join(model_path, "config.json")) as f:
-            config = json.load(f)
-        tokenizer = DeepSeekTokenizer(model_path)
+        # Initialize memory mappings
+        self._init_mappings(model_path)
         
-        # Load weights with progress tracking
-        weights = {}
-        for name in tqdm(self.tensor_info.keys(), desc="Loading weights"):
-            weights[name] = LazyTensor(
-                loader=self,
-                name=name,
-                device=device,
-                dtype=dtype
-            )
-            self.size_done += np.prod(self.tensor_info[name].shape) * self._get_dtype_size(dtype or torch.float32)
+        # Load tensors
+        tensors = {}
+        for name in tqdm(self.tensor_info.keys(), desc="Loading tensors"):
+            tensor = self._load_tensor(name, device)
+            tensors[name] = tensor
             
+            self.size_done += np.prod(tensor.shape) * tensor.element_size()
             if progress_callback:
                 progress = self.size_done / self.size_data
-                if not progress_callback(progress):
-                    break
+                progress_callback(progress)
         
-        return {
-            "config": config,
-            "tokenizer": tokenizer,
-            "weights": weights,
-            "device": device
-        }
+        return tensors
 
 
 class LazyTensor:
@@ -361,7 +356,7 @@ class LazyTensor:
     def materialize(self) -> torch.Tensor:
         """Load tensor into memory."""
         if self._tensor is None:
-            self._tensor = self.loader._load_tensor(self.name, self.device, self.dtype)
+            self._tensor = self.loader._load_tensor(self.name, self.device)
         return self._tensor
     
     def __del__(self):
