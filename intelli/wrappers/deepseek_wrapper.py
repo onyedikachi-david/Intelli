@@ -237,6 +237,9 @@ class DeepSeekWrapper:
                 else:
                     raise ValueError(f"Unexpected logits shape: {logits.shape}")
                 
+                # Handle numerical stability
+                next_token_logits = next_token_logits - next_token_logits.max()
+                
                 # Print initial logits stats for debugging
                 print(f"Initial logits - min: {next_token_logits.min():.2f}, max: {next_token_logits.max():.2f}, mean: {next_token_logits.mean():.2f}")
                 
@@ -270,6 +273,9 @@ class DeepSeekWrapper:
                         indices_to_remove = sorted_indices[sorted_indices_to_remove]
                         next_token_logits[indices_to_remove] = float('-inf')
                     
+                    # Handle numerical stability before softmax
+                    next_token_logits = next_token_logits - next_token_logits.max()
+                    
                     # Apply softmax
                     probs = torch.softmax(next_token_logits, dim=-1)
                     
@@ -283,7 +289,10 @@ class DeepSeekWrapper:
                     
                     # Add the chosen token to the sequence
                     generated.append(next_token.item())
-                    input_ids = torch.cat([input_ids, next_token.unsqueeze(0).unsqueeze(0)], dim=1)
+                    
+                    # Reshape next_token to match input_ids dimensions [batch_size, seq_len]
+                    next_token = next_token.unsqueeze(0)  # Add batch dimension
+                    input_ids = torch.cat([input_ids, next_token], dim=1)
                     
                     # Get next token's logits
                     outputs = self.model(input_ids)
@@ -297,6 +306,9 @@ class DeepSeekWrapper:
                         next_token_logits = logits[0, -1, :].float()
                     elif len(logits.shape) == 2:
                         next_token_logits = logits[-1, :].float()
+                    
+                    # Handle numerical stability
+                    next_token_logits = next_token_logits - next_token_logits.max()
                     
                     # Decode the token and add to response
                     token_text = self.tokenizer.decode([next_token.item()], skip_special_tokens=True)
