@@ -298,48 +298,54 @@ class ModelLoader:
         if "1.5b" in self.model_path.lower():
             hidden_dim = 2048
             intermediate_dim = 5440
-            vocab_size = 151936
+            vocab_size = 76000  # Updated to match model's vocab size
+            
+            # Map tensor names to remove "model." prefix if present
+            clean_name = name.replace("model.", "")
         else:
             hidden_dim = 1536
             intermediate_dim = 8960
             vocab_size = 151936
+            clean_name = name
             
         # Adjust shape for 1.5B model
         if "1.5b" in self.model_path.lower():
-            if name == "model.embed_tokens.weight":
-                # Calculate vocab size based on actual size
-                vocab_size = actual_size // hidden_dim
+            if clean_name == "embed_tokens.weight" or clean_name == "lm_head.weight":
+                # Use fixed vocab size for these layers
                 shape = (vocab_size, hidden_dim)
-            elif name == "lm_head.weight":
-                # Use same shape as embed_tokens
-                vocab_size = actual_size // hidden_dim
-                shape = (vocab_size, hidden_dim)
-            elif name.endswith(".weight") and original_shape[-1] == 1536:
+                if actual_size != np.prod(shape):
+                    print(f"Warning: Size mismatch for {name}, using original shape")
+                    shape = original_shape
+            elif clean_name.endswith(".weight") and original_shape[-1] == 1536:
                 # Update hidden dimension for all weight matrices
                 new_shape = list(original_shape)
                 new_shape[-1] = hidden_dim
-                if name.startswith("model.layers.") and "mlp." in name:
-                    if "gate_proj" in name or "up_proj" in name:
+                if "mlp." in clean_name:
+                    if "gate_proj" in clean_name or "up_proj" in clean_name:
                         new_shape[0] = intermediate_dim
-                    elif "down_proj" in name:
+                    elif "down_proj" in clean_name:
                         new_shape[-1] = intermediate_dim
                 shape = tuple(new_shape)
-            elif name.endswith(".weight") and original_shape[0] == 1536:
+            elif clean_name.endswith(".weight") and original_shape[0] == 1536:
                 # Update input dimension for all weight matrices
                 new_shape = list(original_shape)
                 new_shape[0] = hidden_dim
-                if name.startswith("model.layers.") and "mlp." in name:
-                    if "gate_proj" in name or "up_proj" in name:
+                if "mlp." in clean_name:
+                    if "gate_proj" in clean_name or "up_proj" in clean_name:
                         new_shape[-1] = intermediate_dim
-                    elif "down_proj" in name:
+                    elif "down_proj" in clean_name:
                         new_shape[0] = intermediate_dim
                 shape = tuple(new_shape)
-            elif name.endswith(".bias") or (name.endswith(".weight") and len(original_shape) == 1):
+            elif clean_name.endswith(".bias") or (clean_name.endswith(".weight") and len(original_shape) == 1):
                 # Update all 1D tensors (biases and layernorm weights)
                 if original_shape[0] == 1536:
                     shape = (hidden_dim,)
-                elif "self_attn" in name and "proj_a" in name:
+                elif "self_attn" in clean_name and "proj_a" in clean_name:
                     shape = (16,)  # Updated from 32 for LoRA
+            
+            # Special handling for norm layers
+            if clean_name in ["norm.weight", "input_layernorm.weight", "post_attention_layernorm.weight"]:
+                shape = (hidden_dim,)
         
         # Verify tensor size matches target shape
         target_size = np.prod(shape)
@@ -347,12 +353,11 @@ class ModelLoader:
             print(f"Warning: Size mismatch for tensor {name}")
             print(f"Actual size: {actual_size}, Target shape: {shape} (size {target_size})")
             
-            # For embedding and lm_head, calculate shape based on actual size
-            if name in ["model.embed_tokens.weight", "lm_head.weight"]:
-                vocab_size = actual_size // hidden_dim
+            # For embedding and lm_head, use fixed vocab size
+            if clean_name in ["embed_tokens.weight", "lm_head.weight"]:
                 shape = (vocab_size, hidden_dim)
             # For MLP layers, adjust intermediate dimension
-            elif "mlp." in name and len(shape) == 2:
+            elif "mlp." in clean_name and len(shape) == 2:
                 if actual_size % shape[1] == 0:
                     shape = (actual_size // shape[1], shape[1])
                 elif actual_size % shape[0] == 0:
