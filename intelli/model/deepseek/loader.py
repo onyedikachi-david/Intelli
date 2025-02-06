@@ -275,25 +275,58 @@ class ModelLoader:
         else:
             return 4
     
-    def _load_tensor(self, name: str, device: str = "cuda") -> torch.Tensor:
-        """Load a tensor from memory mapping."""
-        info = self.tensor_info[name]
-        shard = list(self.mappings.values())[info.file_idx]
+    def _load_tensor(self, name: str, device: str = "cpu") -> torch.Tensor:
+        """Load a tensor from the safetensors file."""
+        info = self.safetensors_header[name]
         
-        # Read tensor data from memory mapping
-        tensor_size = np.prod(info.shape) * self._get_dtype_size(self.dtype)
-        tensor_data = np.frombuffer(
-            shard.mm[info.offset:info.offset + tensor_size],
-            dtype=np.float32 if info.dtype == TensorType.F32 else np.float16
-        ).reshape(info.shape)
+        # Get tensor info
+        dtype = self._dtype_from_str(info["dtype"])
+        shape = info["shape"]
         
-        # Convert to torch tensor
-        tensor = torch.from_numpy(tensor_data).to(device)
+        # Adjust shape for 1.5B model
+        if "1.5b" in self.model_path.lower():
+            if name == "lm_head.weight":
+                shape = (76000, 2048)  # Updated vocab size and hidden dim
+            elif name.endswith(".weight") and shape[-1] == 1536:
+                # Update hidden dimension for all weight matrices
+                new_shape = list(shape)
+                new_shape[-1] = 2048
+                if name.startswith("layers.") and "mlp." in name:
+                    if "gate_proj" in name or "up_proj" in name:
+                        new_shape[0] = 5440  # Updated intermediate size
+                    elif "down_proj" in name:
+                        new_shape[-1] = 5440  # Updated intermediate size
+                shape = tuple(new_shape)
+            elif name.endswith(".weight") and shape[0] == 1536:
+                # Update input dimension for all weight matrices
+                new_shape = list(shape)
+                new_shape[0] = 2048
+                if name.startswith("layers.") and "mlp." in name:
+                    if "gate_proj" in name or "up_proj" in name:
+                        new_shape[-1] = 5440  # Updated intermediate size
+                    elif "down_proj" in name:
+                        new_shape[0] = 5440  # Updated intermediate size
+                shape = tuple(new_shape)
+            elif name.endswith(".bias") or name.endswith(".weight") and len(shape) == 1:
+                # Update all 1D tensors (biases and layernorm weights)
+                if shape[0] == 1536:
+                    shape = (2048,)
+                elif "self_attn" in name and "proj_a" in name:
+                    shape = (16,)  # Updated from 32 for LoRA
         
-        # Apply quantization if enabled
-        if self.quantize and info.dtype not in [TensorType.Q8_0, TensorType.Q4_0, TensorType.Q4_1]:
-            tensor = self._quantize_tensor(tensor)
+        # Load tensor data
+        tensor = self._load_tensor_data(name, info, dtype)
         
+        # Reshape and move to device
+        try:
+            tensor = tensor.reshape(shape)
+        except ValueError as e:
+            print(f"Error reshaping tensor {name} from size {tensor.size()} to {shape}")
+            raise e
+            
+        if device != "cpu":
+            tensor = tensor.to(device)
+            
         return tensor
     
     def _quantize_tensor(self, tensor: torch.Tensor) -> torch.Tensor:

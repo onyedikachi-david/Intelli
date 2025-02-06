@@ -162,14 +162,23 @@ class DeepSeekWrapper:
                 })
             elif "1.5b" in self.model_variant.lower():
                 model_config.update({
-                    "dim": 2048,  # Updated from 1536
-                    "n_layers": 24,  # Updated from 28
-                    "n_heads": 16,  # Updated from 12
-                    "vocab_size": 76000,  # Updated from 151936
+                    "dim": 2048,  # Hidden dimension
+                    "n_layers": 24,  # Number of layers
+                    "n_heads": 16,  # Number of attention heads
+                    "vocab_size": 76000,  # Vocabulary size
                     "max_seq_len": 8192,
                     "max_batch_size": 32,
-                    "inter_dim": 5440,  # Updated from 8960
-                    "kv_lora_rank": 128  # Updated from 256
+                    "inter_dim": 5440,  # MLP intermediate dimension
+                    "kv_lora_rank": 16,  # LoRA rank for key/value projections
+                    "qk_nope_head_dim": 128,
+                    "qk_rope_head_dim": 64,
+                    "v_head_dim": 128,
+                    "original_seq_len": 4096,
+                    "rope_theta": 10000.0,
+                    "rope_factor": 40,
+                    "beta_fast": 32,
+                    "beta_slow": 1,
+                    "mscale": 1.0
                 })
         
         # Set default values for missing arguments
@@ -177,7 +186,7 @@ class DeepSeekWrapper:
             'dtype': 'bf16',
             'max_batch_size': 32,
             'max_seq_len': 8192,
-            'inter_dim': 5440,  # Updated for 1.5B model
+            'inter_dim': 5440,  # MLP intermediate dimension
             'moe_inter_dim': 1408,
             'n_dense_layers': 1,
             'n_routed_experts': 64,
@@ -188,7 +197,7 @@ class DeepSeekWrapper:
             'score_func': 'softmax',
             'route_scale': 1.0,
             'q_lora_rank': 0,
-            'kv_lora_rank': 128,  # Updated from 256
+            'kv_lora_rank': 16,  # LoRA rank for key/value projections
             'qk_nope_head_dim': 128,
             'qk_rope_head_dim': 64,
             'v_head_dim': 128,
