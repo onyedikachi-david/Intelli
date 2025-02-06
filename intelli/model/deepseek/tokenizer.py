@@ -88,15 +88,29 @@ class DeepSeekTokenizer:
     
     def _write_spm_model(self, output_path: str):
         """Write a SentencePiece model file from JSON vocab."""
-        # Create a temporary text file with the vocabulary
+        # Create a temporary text file with the vocabulary and sample text
         import tempfile
         with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as vocab_file:
-            # Write each token on a new line with its score
+            # Write each token on a new line with its score and sample text
             vocab = self.tokenizer_json.get('vocab', {})
+            
+            # Write sample text for training
+            sample_text = "This is a sample text to ensure the model has some training data.\n"
+            sample_text += "Hello world! How are you doing today?\n"
+            sample_text += "The quick brown fox jumps over the lazy dog.\n"
+            vocab_file.write(sample_text)
+            
+            # Write vocabulary items
             for token, _ in sorted(vocab.items(), key=lambda x: x[1]):
-                # Escape special characters in the token
-                escaped_token = token.encode('unicode_escape').decode('utf-8')
-                vocab_file.write(f"{escaped_token}\t0.0\n")
+                # Add the token as a sample text as well
+                if len(token) > 0:  # Skip empty tokens
+                    try:
+                        # Try to decode the token if it's a byte sequence
+                        token_text = bytes([int(token[2:], 16)]).decode('utf-8') if token.startswith('0x') else token
+                        vocab_file.write(f"{token_text}\n")
+                    except:
+                        # If decoding fails, write the token as is
+                        vocab_file.write(f"{token}\n")
             vocab_file.flush()
             
             # Train a new SentencePiece model
@@ -104,19 +118,24 @@ class DeepSeekTokenizer:
             spm.SentencePieceTrainer.Train(
                 f'--input={vocab_file.name} '
                 f'--model_prefix={output_path[:-6]} '  # Remove .model suffix
-                '--vocab_size=32000 '  # Large enough for most vocabularies
+                '--vocab_size=8000 '  # Reduced vocab size to match available tokens
                 '--character_coverage=1.0 '
-                '--model_type=bpe '
+                '--model_type=unigram '
                 '--pad_id=0 '
                 '--bos_id=1 '
                 '--eos_id=2 '
                 '--unk_id=3 '
-                '--input_format=tsv '
+                '--input_format=text '  # Changed to text format
                 '--hard_vocab_limit=false '
                 '--normalization_rule_name=identity '
                 '--treat_whitespace_as_suffix=true '
                 '--add_dummy_prefix=false '
-                '--remove_extra_whitespaces=false'
+                '--remove_extra_whitespaces=false '
+                '--max_sentence_length=8192 '
+                '--split_by_unicode_script=false '
+                '--split_by_whitespace=false '
+                '--split_digits=false '
+                '--byte_fallback=true'  # Enable byte fallback for unknown characters
             )
             
             # Clean up
