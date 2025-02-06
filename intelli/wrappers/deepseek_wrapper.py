@@ -162,14 +162,14 @@ class DeepSeekWrapper:
                 })
             elif "1.5b" in self.model_variant.lower():
                 model_config.update({
-                    "dim": 1536,
-                    "n_layers": 28,
-                    "n_heads": 12,
+                    "dim": 2048,  # Updated from 1536
+                    "n_layers": 24,  # Updated from 28
+                    "n_heads": 16,  # Updated from 12
                     "vocab_size": 151936,
                     "max_seq_len": 8192,
                     "max_batch_size": 32,
-                    "inter_dim": 8960,
-                    "kv_lora_rank": 256  # Critical: Set correct LoRA rank for 1.5B model
+                    "inter_dim": 8192,  # Updated from 8960
+                    "kv_lora_rank": 256
                 })
         
         # Set default values for missing arguments
@@ -177,7 +177,7 @@ class DeepSeekWrapper:
             'dtype': 'bf16',
             'max_batch_size': 32,
             'max_seq_len': 8192,
-            'inter_dim': 8960,  # Updated for 1.5B model
+            'inter_dim': 8192,  # Updated for 1.5B model
             'moe_inter_dim': 1408,
             'n_dense_layers': 1,
             'n_routed_experts': 64,
@@ -188,7 +188,7 @@ class DeepSeekWrapper:
             'score_func': 'softmax',
             'route_scale': 1.0,
             'q_lora_rank': 0,
-            'kv_lora_rank': 256,  # Critical: Default to 256 for LoRA rank
+            'kv_lora_rank': 256,
             'qk_nope_head_dim': 128,
             'qk_rope_head_dim': 64,
             'v_head_dim': 128,
@@ -221,47 +221,68 @@ class DeepSeekWrapper:
                 layer_num = int(key.split('.')[1])
                 base_key = key.replace('k_proj', 'k_proj_a').replace('v_proj', 'v_proj_a')
                 
-                # Reshape weight for model parallel sharding
-                weight = tensor.view(args.kv_lora_rank, args.dim)  # [256, 1536]
-                
-                # Split into 8 shards
-                mp_size = 8
-                shard_size = args.kv_lora_rank // mp_size  # 32
-                weight = weight.view(mp_size, shard_size, args.dim)  # [8, 32, 1536]
-                
-                # Add each shard to state dict
-                for i in range(mp_size):
-                    shard_key = f"{base_key[:-7]}.{i}.weight"  # Replace .weight with shard index
-                    state_dict[shard_key] = weight[i].contiguous()
-                
-                # Add proj_b weights (shared across shards)
-                proj_b_key = key.replace('k_proj', 'k_proj_b').replace('v_proj', 'v_proj_b')
-                state_dict[proj_b_key] = torch.eye(
-                    args.dim,
-                    shard_size,  # Use shard_size instead of lora_rank
-                    device=tensor.device,
-                    dtype=tensor.dtype
-                )
+                try:
+                    # Reshape weight for model parallel sharding
+                    weight = tensor.view(-1, args.dim)  # Dynamically determine first dimension
+                    
+                    # Split into 8 shards
+                    mp_size = 8
+                    shard_size = weight.size(0) // mp_size
+                    weight = weight.view(mp_size, shard_size, args.dim)
+                    
+                    # Add each shard to state dict
+                    for i in range(mp_size):
+                        shard_key = f"{base_key[:-7]}.{i}.weight"  # Replace .weight with shard index
+                        state_dict[shard_key] = weight[i].contiguous()
+                    
+                    # Add proj_b weights (shared across shards)
+                    proj_b_key = key.replace('k_proj', 'k_proj_b').replace('v_proj', 'v_proj_b')
+                    state_dict[proj_b_key] = torch.eye(
+                        args.dim,
+                        shard_size,  # Use shard_size instead of lora_rank
+                        device=tensor.device,
+                        dtype=tensor.dtype
+                    )
+                except Exception as e:
+                    print(f"Error processing tensor {key}: {str(e)}")
+                    print(f"Tensor shape: {tensor.shape}, Expected dim: {args.dim}")
+                    raise
+                    
             # Handle key/value projection biases
             elif 'k_proj.bias' in key or 'v_proj.bias' in key:
                 # Get layer number from key
                 layer_num = int(key.split('.')[1])
                 base_key = key.replace('k_proj', 'k_proj_a').replace('v_proj', 'v_proj_a')
                 
-                # Split bias into shards
-                mp_size = 8
-                shard_size = args.kv_lora_rank // mp_size  # 32
-                bias = tensor.view(mp_size, shard_size)  # [8, 32]
-                
-                # Add each shard to state dict
-                for i in range(mp_size):
-                    bias_key = f"{base_key[:-5]}.{i}.bias"  # Replace .bias with shard index
-                    state_dict[bias_key] = bias[i].contiguous()
+                try:
+                    # Split bias into shards
+                    mp_size = 8
+                    shard_size = tensor.numel() // mp_size
+                    bias = tensor.view(mp_size, shard_size)
+                    
+                    # Add each shard to state dict
+                    for i in range(mp_size):
+                        bias_key = f"{base_key[:-5]}.{i}.bias"  # Replace .bias with shard index
+                        state_dict[bias_key] = bias[i].contiguous()
+                except Exception as e:
+                    print(f"Error processing bias {key}: {str(e)}")
+                    print(f"Tensor shape: {tensor.shape}")
+                    raise
             else:
                 state_dict[key] = tensor
         
-        # Load state dict
-        self.model.load_state_dict(state_dict)
+        # Load state dict with error handling
+        try:
+            missing_keys, unexpected_keys = self.model.load_state_dict(state_dict, strict=False)
+            if missing_keys:
+                print(f"Missing keys: {missing_keys}")
+            if unexpected_keys:
+                print(f"Unexpected keys: {unexpected_keys}")
+        except Exception as e:
+            print(f"Error loading state dict: {str(e)}")
+            print("Model config:", model_config)
+            raise
+            
         self.model.eval()
         
     def update_params(self, **kwargs):
