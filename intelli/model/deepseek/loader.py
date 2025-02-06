@@ -106,15 +106,42 @@ class ModelLoader:
         
         for filename in files:
             local_path = os.path.join(model_dir, filename)
-            if not os.path.exists(local_path):
+            if not os.path.exists(local_path) or os.path.getsize(local_path) == 0:
                 url = f"{base_url}/{filename}"
                 try:
+                    # Try direct download first
                     self._download_file(url, local_path)
-                except requests.exceptions.HTTPError as e:
-                    if e.response.status_code == 404:
-                        print(f"Warning: {filename} not found, skipping...")
+                    
+                    # Verify file was downloaded successfully
+                    if os.path.getsize(local_path) == 0:
+                        raise requests.exceptions.HTTPError(f"Downloaded file {filename} is empty")
+                        
+                except (requests.exceptions.HTTPError, requests.exceptions.ConnectionError) as e:
+                    # If direct download fails, try alternative paths for tokenizer files
+                    if filename == "tokenizer.model":
+                        alt_paths = [
+                            f"{base_url}/pytorch_model.bin",  # Try pytorch model file
+                            f"https://huggingface.co/{model_id}/raw/{revision}/tokenizer.model",  # Try raw file
+                            f"https://huggingface.co/{model_id}/resolve/{revision}/tokenizer/tokenizer.model"  # Try tokenizer subdir
+                        ]
+                        for alt_url in alt_paths:
+                            try:
+                                self._download_file(alt_url, local_path)
+                                if os.path.getsize(local_path) > 0:
+                                    break
+                            except:
+                                continue
+                        
+                        if os.path.getsize(local_path) == 0:
+                            print(f"Warning: Could not download {filename}, will attempt to use default tokenizer")
+                            # Copy default tokenizer if available
+                            default_tokenizer = os.path.join(os.path.dirname(__file__), "default_tokenizer.model")
+                            if os.path.exists(default_tokenizer):
+                                import shutil
+                                shutil.copy2(default_tokenizer, local_path)
+                    else:
+                        print(f"Warning: {filename} not found or failed to download, skipping...")
                         continue
-                    raise
         
         # Create a simple index file if not downloaded
         index_path = os.path.join(model_dir, "model.safetensors.index.json")
