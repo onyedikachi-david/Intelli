@@ -117,7 +117,51 @@ class DeepSeekWrapper:
             # Remove "model." prefix from key
             if key.startswith("model."):
                 key = key[6:]  # Remove "model." prefix
-            state_dict[key] = tensor
+            
+            # Handle key/value projection weights
+            if 'k_proj.weight' in key or 'v_proj.weight' in key:
+                # Get layer number from key
+                layer_num = int(key.split('.')[1])
+                base_key = key.replace('k_proj', 'k_proj_a').replace('v_proj', 'v_proj_a')
+                
+                # Get dimensions from tensor
+                out_dim, in_dim = tensor.shape
+                
+                # Split into 8 shards
+                mp_size = 8
+                shard_size = out_dim // mp_size
+                weight = tensor.view(mp_size, shard_size, in_dim)  # [8, shard_size, in_dim]
+                
+                # Add each shard to state dict
+                for i in range(mp_size):
+                    shard_key = f"{base_key[:-7]}.{i}.weight"  # Replace .weight with shard index
+                    state_dict[shard_key] = weight[i].contiguous()
+                
+                # Add proj_b weights (identity matrix for each shard)
+                proj_b_key = key.replace('k_proj', 'k_proj_b').replace('v_proj', 'v_proj_b')
+                state_dict[proj_b_key] = torch.eye(
+                    in_dim,
+                    shard_size,
+                    device=tensor.device,
+                    dtype=tensor.dtype
+                )
+            # Handle key/value projection biases
+            elif 'k_proj.bias' in key or 'v_proj.bias' in key:
+                # Get layer number from key
+                layer_num = int(key.split('.')[1])
+                base_key = key.replace('k_proj', 'k_proj_a').replace('v_proj', 'v_proj_a')
+                
+                # Split bias into shards
+                mp_size = 8
+                shard_size = tensor.size(0) // mp_size
+                bias = tensor.view(mp_size, shard_size)  # [8, shard_size]
+                
+                # Add each shard to state dict
+                for i in range(mp_size):
+                    bias_key = f"{base_key[:-5]}.{i}.bias"  # Replace .bias with shard index
+                    state_dict[bias_key] = bias[i].contiguous()
+            else:
+                state_dict[key] = tensor
         
         # Load state dict
         self.model.load_state_dict(state_dict)
