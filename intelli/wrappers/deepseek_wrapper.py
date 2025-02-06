@@ -303,10 +303,12 @@ class DeepSeekWrapper:
         generated = []
         
         # Generate tokens
-        for _ in range(self.max_length):
+        print(f"\nGeneration started (max_length={self.max_length})...")
+        for i in range(self.max_length):
             with torch.no_grad():
                 outputs = self.model(input_ids)
-                next_token_logits = outputs[0, -1, :].float()  # Ensure float type
+                next_token_logits = outputs[0, -1, :].float()
+                print(f"\rProcessing token {i+1}/{self.max_length} | Last token ID: {next_token.item() if i > 0 else 'None'}", end="", flush=True)
                 
                 # Apply repetition penalty first
                 if len(generated) > 0:
@@ -322,6 +324,7 @@ class DeepSeekWrapper:
                     generated.append(next_token.item())
                     input_ids = torch.cat([input_ids, next_token.unsqueeze(0)], dim=1)
                     if next_token.item() == self.tokenizer.eos_token_id:
+                        print("\nEarly stopping: EOS token reached")
                         break
                     continue
                 
