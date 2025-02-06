@@ -453,32 +453,80 @@ class ModelLoader:
         self.quantize = quantize
         self.dtype = dtype or self.dtype
         
-        # Load config with default values
+        # Initialize memory mappings first to get tensor info
+        self._init_mappings(model_path)
+        
+        # Determine model dimensions from checkpoint
+        hidden_size = None
+        vocab_size = None
+        intermediate_size = None
+        num_attention_heads = None
+        
+        # Try to get dimensions from various tensors
+        for name, info in self.safetensors_header.items():
+            shape = info["shape"]
+            
+            # Get hidden size from input layernorm
+            if "input_layernorm.weight" in name:
+                hidden_size = shape[0]
+                break
+        
+        # If not found, try embedding
+        if hidden_size is None:
+            for name, info in self.safetensors_header.items():
+                if name.endswith("embed_tokens.weight"):
+                    hidden_size = info["shape"][1]
+                    vocab_size = info["shape"][0]
+                    break
+        
+        # Get intermediate size from MLP layers
+        for name, info in self.safetensors_header.items():
+            if "mlp.gate_proj.weight" in name:
+                intermediate_size = info["shape"][0]
+                break
+            elif "mlp.up_proj.weight" in name:
+                intermediate_size = info["shape"][0]
+                break
+        
+        # Get attention heads from attention layers
+        for name, info in self.safetensors_header.items():
+            if "self_attn.o_proj.weight" in name:
+                o_proj_shape = info["shape"]
+                # Attention output size is typically num_heads * head_dim
+                num_attention_heads = o_proj_shape[0] // (hidden_size // 32)  # Common head size is 32
+                break
+        
+        # Count number of layers
+        num_layers = len([name for name in self.safetensors_header if "input_layernorm.weight" in name])
+        
+        # Create config from checkpoint dimensions
         config = {
             "model_type": "deepseek",
-            "vocab_size": 151936,
-            "hidden_size": 1536,
-            "num_hidden_layers": 28,
-            "num_attention_heads": 12,
-            "intermediate_size": 8960,
-            "max_position_embeddings": 8192,
+            "vocab_size": vocab_size,
+            "hidden_size": hidden_size,
+            "num_hidden_layers": num_layers,
+            "num_attention_heads": num_attention_heads,
+            "intermediate_size": intermediate_size,
+            "max_position_embeddings": 8192,  # This could also be determined from position embeddings
             "max_sequence_length": 8192,
             "use_cache": True,
             "pad_token_id": 0,
             "bos_token_id": 1,
             "eos_token_id": 2,
             "tie_word_embeddings": True,
-            "dtype": "bf16"
+            "dtype": str(self.dtype).replace("torch.", "")
         }
         
+        # Load config file if it exists to override any values
         config_path = os.path.join(model_path, "config.json")
         if os.path.exists(config_path):
             try:
                 with open(config_path) as f:
                     loaded_config = json.load(f)
-                    config.update(loaded_config)
+                    # Only update values that aren't None
+                    config.update({k: v for k, v in loaded_config.items() if v is not None})
             except (json.JSONDecodeError, IOError) as e:
-                print(f"Warning: Failed to load config.json: {str(e)}. Using default values.")
+                print(f"Warning: Failed to load config.json: {str(e)}. Using detected values.")
             
         # Load tokenizer
         try:
@@ -486,9 +534,6 @@ class ModelLoader:
         except Exception as e:
             print(f"Warning: Failed to load tokenizer: {str(e)}. Using default tokenizer.")
             tokenizer = DeepSeekTokenizer(None)  # Use default tokenizer
-        
-        # Initialize memory mappings
-        self._init_mappings(model_path)
         
         # Load tensors
         tensors = {}
