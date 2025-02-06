@@ -18,6 +18,8 @@ class DeepSeekTokenizer:
         
         # Try loading JSON tokenizer first
         json_file = os.path.join(model_path, "tokenizer.json")
+        model_file = os.path.join(model_path, "tokenizer.model")
+        
         if os.path.exists(json_file):
             with open(json_file, 'r') as f:
                 self.tokenizer_json = json.load(f)
@@ -30,12 +32,43 @@ class DeepSeekTokenizer:
                 self.sp_model.Load(tmp.name)
                 # Clean up
                 os.unlink(tmp.name)
+        elif os.path.exists(model_file):
+            # Try loading binary model
+            self.sp_model.Load(model_file)
         else:
-            # Fall back to binary model
-            vocab_file = os.path.join(model_path, "tokenizer.model")
-            if not os.path.exists(vocab_file):
-                raise FileNotFoundError(f"No tokenizer found at {model_path}")
-            self.sp_model.Load(vocab_file)
+            # Create a basic tokenizer from scratch
+            print("No tokenizer files found, creating basic tokenizer...")
+            import tempfile
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
+                # Write basic vocabulary
+                basic_vocab = [
+                    "<|endoftext|>", "<|user|>", "<|assistant|>",
+                    ".", ",", "!", "?", "-", "'", '"', "\n",
+                    *[chr(i) for i in range(ord('a'), ord('z')+1)],  # a-z
+                    *[chr(i) for i in range(ord('A'), ord('Z')+1)],  # A-Z
+                    *[chr(i) for i in range(ord('0'), ord('9')+1)],  # 0-9
+                    *[chr(i) for i in range(0x4E00, 0x9FFF)]  # Common Chinese characters
+                ]
+                for token in basic_vocab:
+                    f.write(f"{token}\n")
+                f.flush()
+                
+                # Train basic model
+                spm.SentencePieceTrainer.Train(
+                    f'--input={f.name} '
+                    f'--model_prefix={model_file[:-6]} '
+                    '--vocab_size=32000 '
+                    '--character_coverage=0.9995 '
+                    '--model_type=unigram '
+                    '--pad_id=0 --bos_id=1 --eos_id=2 --unk_id=3 '
+                    '--control_symbols=<|user|>,<|assistant|>'
+                )
+                
+                # Clean up
+                os.unlink(f.name)
+            
+            # Load the created model
+            self.sp_model.Load(model_file)
         
         # Load config if available
         config_file = os.path.join(model_path, "tokenizer_config.json")

@@ -98,17 +98,36 @@ class ModelLoader:
         Returns:
             Path to downloaded model directory
         """
+        # Ensure correct casing for model ID
+        if "deepseek" in model_id.lower():
+            parts = model_id.split("/")
+            if len(parts) == 2:
+                # Convert model name part to title case
+                model_name_parts = parts[1].split("-")
+                model_name_parts = [p.title() for p in model_name_parts]
+                parts[1] = "-".join(model_name_parts)
+                model_id = "/".join(parts)
+        
         model_dir = os.path.join(self.cache_dir, model_id.replace('/', '_'))
         os.makedirs(model_dir, exist_ok=True)
         
         # Files to download
         files = [
             "config.json",
-            "tokenizer.model",
             "tokenizer_config.json",
             "model.safetensors"
         ]
         
+        # Try to download tokenizer files from various locations
+        tokenizer_files = [
+            "tokenizer.json",
+            "tokenizer.model",
+            "tokenizer/tokenizer.json",
+            "tokenizer/tokenizer.model",
+            "sentencepiece.bpe.model"
+        ]
+        
+        # First download the main files
         for filename in files:
             local_path = os.path.join(model_dir, filename)
             try:
@@ -129,36 +148,37 @@ class ModelLoader:
                     
             except Exception as e:
                 print(f"Warning: Failed to download {filename}: {str(e)}")
-                if filename == "tokenizer.model":
-                    # Try alternative paths for tokenizer
-                    try:
-                        tokenizer_paths = [
-                            "tokenizer/tokenizer.model",
-                            "pytorch_model.bin",  # Some models store tokenizer here
-                            "tokenizer.json"  # Try json format
-                        ]
-                        for alt_path in tokenizer_paths:
-                            try:
-                                downloaded_path = hf_hub_download(
-                                    repo_id=model_id,
-                                    filename=alt_path,
-                                    revision=revision,
-                                    cache_dir=self.cache_dir,
-                                    local_files_only=False,
-                                    resume_download=True
-                                )
-                                if os.path.exists(downloaded_path):
-                                    shutil.copy2(downloaded_path, local_path)
-                                    break
-                            except:
-                                continue
-                    except Exception as e:
-                        print(f"Warning: Could not download tokenizer from alternative paths: {str(e)}")
-                        # Try to use a default tokenizer as last resort
-                        default_tokenizer = os.path.join(os.path.dirname(__file__), "default_tokenizer.model")
-                        if os.path.exists(default_tokenizer):
-                            shutil.copy2(default_tokenizer, local_path)
                 continue
+        
+        # Then try to download tokenizer files
+        tokenizer_found = False
+        for filename in tokenizer_files:
+            try:
+                downloaded_path = hf_hub_download(
+                    repo_id=model_id,
+                    filename=filename,
+                    revision=revision,
+                    cache_dir=self.cache_dir,
+                    local_files_only=False,
+                    resume_download=True
+                )
+                
+                # If we found a tokenizer file, copy it to both tokenizer.json and tokenizer.model
+                if os.path.exists(downloaded_path):
+                    import shutil
+                    if filename.endswith('.json'):
+                        shutil.copy2(downloaded_path, os.path.join(model_dir, "tokenizer.json"))
+                    else:
+                        shutil.copy2(downloaded_path, os.path.join(model_dir, "tokenizer.model"))
+                    tokenizer_found = True
+                    break
+                    
+            except Exception as e:
+                print(f"Warning: Failed to download {filename}: {str(e)}")
+                continue
+        
+        if not tokenizer_found:
+            print("Warning: Could not find any tokenizer files, will attempt to create from scratch")
         
         # Create index file if needed
         index_path = os.path.join(model_dir, "model.safetensors.index.json")
