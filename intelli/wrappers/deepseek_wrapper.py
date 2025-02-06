@@ -59,12 +59,12 @@ class DeepSeekWrapper:
         self.use_flash_attention = use_flash_attention
         self.max_memory = max_memory
         
-        # Default generation parameters - adjusted for code generation
-        self.temperature = 0.8  # Slightly higher temperature for more creative code
-        self.top_p = 0.95     # Higher top_p for more diverse tokens
-        self.top_k = 0        # Disable top-k to rely on nucleus sampling
+        # Default generation parameters - balanced for general use
+        self.temperature = 0.7
+        self.top_p = 0.9
+        self.top_k = 40
         self.max_length = 2048
-        self.repetition_penalty = 1.2  # Slightly higher to avoid repetitive code
+        self.repetition_penalty = 1.1
         
         # Load model
         self._load_model()
@@ -295,28 +295,9 @@ class DeepSeekWrapper:
             temp_params = {k: getattr(self, k) for k in ['temperature', 'top_p', 'top_k', 'max_length', 'repetition_penalty']}
             self.update_params(**kwargs)
         
-        # Format prompt for code generation
-        if ":" in prompt and not prompt.strip().endswith(":"):
-            # If prompt contains ":" but doesn't end with it, it's likely a request for code
-            # Add some context to help the model
-            formatted_prompt = f"""Write a complete and efficient implementation for the following:
-
-{prompt}
-
-Here's a clean and efficient implementation:
-
-```python
-def"""
-        else:
-            formatted_prompt = prompt
-            
         # Format as chat messages
         messages = [
-            {
-                "role": "system", 
-                "content": "You are a helpful AI programming assistant. Write clean, efficient, and well-documented Python code. Always include docstrings and type hints."
-            },
-            {"role": "user", "content": formatted_prompt}
+            {"role": "user", "content": prompt}
         ]
         
         # Get input tokens
@@ -344,6 +325,12 @@ def"""
                 # Apply temperature scaling
                 if self.temperature > 0:
                     next_token_logits = next_token_logits / self.temperature
+                
+                # Apply top-k filtering
+                if self.top_k > 0:
+                    top_k = min(self.top_k, next_token_logits.size(-1))
+                    indices_to_remove = next_token_logits < torch.topk(next_token_logits, top_k)[0][..., -1, None]
+                    next_token_logits[indices_to_remove] = float('-inf')
                 
                 # Apply top-p (nucleus) filtering
                 if self.top_p < 1.0:
@@ -387,23 +374,22 @@ def"""
                         consecutive_spaces += 1
                     else:
                         consecutive_spaces = 0
-                    # Print progress with actual generated text
+                    # Print progress
                     print(f"\rGenerated ({i+1} tokens): {response_text}", end="", flush=True)
                 
                 # Check for stop conditions
-                if "```" in response_text and response_text.count("```") >= 2:
-                    print("\nGeneration complete: Code block finished")
-                    break
-                elif next_token.item() in [self.tokenizer.eos_token_id, self.tokenizer.user_token_id]:
+                if next_token.item() in [self.tokenizer.eos_token_id, self.tokenizer.user_token_id]:
                     print("\nGeneration complete: End token reached")
                     break
-                elif consecutive_spaces >= 10:  # Increased threshold for consecutive spaces
-                    print("\nGeneration complete: Too many consecutive spaces")
+                elif consecutive_spaces >= 5:  # Reduced threshold for consecutive spaces
+                    print("\nGeneration complete: Multiple spaces detected")
                     break
-                elif response_text.strip() and response_text.strip()[-1] == "}" and i > 50:
-                    # If we've generated a reasonable amount and hit a closing brace
-                    print("\nGeneration complete: Code block ended with closing brace")
-                    break
+                elif len(response_text) > 0 and not response_text[-1].strip():
+                    # Check if we've hit a natural stopping point (sentence end + space)
+                    last_char = response_text.rstrip()[-1] if response_text.rstrip() else ""
+                    if last_char in ".!?" and i > 20:
+                        print("\nGeneration complete: Natural end point reached")
+                        break
         
         print("\n")  # New line after generation
         
@@ -411,26 +397,7 @@ def"""
         if kwargs:
             self.update_params(**temp_params)
         
-        # Clean up the response
-        if "```python" in response_text:
-            # Extract code from markdown code block
-            code = response_text.split("```python")[1].split("```")[0].strip()
-            return code
-        elif "```" in response_text:
-            # Handle case where python marker is missing
-            code = response_text.split("```")[1].split("```")[0].strip()
-            return code
-        else:
-            # If no code block markers, try to extract code by indentation
-            lines = response_text.strip().split("\n")
-            code_lines = []
-            in_code = False
-            for line in lines:
-                if line.startswith("def ") or line.startswith("class "):
-                    in_code = True
-                if in_code and (line.strip() or line.startswith(" ")):
-                    code_lines.append(line)
-            return "\n".join(code_lines) if code_lines else response_text.strip()
+        return response_text.strip()
     
     def __call__(self, prompt: str, **kwargs) -> str:
         """Alias for generate method."""

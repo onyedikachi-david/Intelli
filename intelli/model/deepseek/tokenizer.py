@@ -50,51 +50,38 @@ class DeepSeekTokenizer:
                     "<s>",
                     "</s>",
                     "<pad>",
-                    # Code block markers
-                    "```",
-                    "```python",
-                    "```java",
-                    "```javascript",
-                    "```cpp",
-                    # Basic punctuation
+                    # Basic punctuation and whitespace
                     ".", ",", "!", "?", "-", "'", '"', "\n", " ", "\t",
                     "(", ")", "[", "]", "{", "}", ":", ";", "+", "-", "*", "/", "%",
-                    "=", "==", "!=", "<", ">", "<=", ">=", "+=", "-=", "*=", "/=",
-                    # Programming keywords
-                    "def", "class", "return", "import", "from", "if", "else", "elif", "for", "while",
-                    "try", "except", "finally", "raise", "with", "as", "in", "is", "not", "and", "or",
-                    "True", "False", "None", "self", "__init__", "print", "range", "len", "str", "int",
-                    "float", "list", "dict", "set", "tuple", "lambda", "map", "filter", "reduce",
-                    # Common programming patterns
-                    "return", "yield", "break", "continue", "pass", "assert", "raise",
-                    # Common variable names
-                    "i", "j", "k", "n", "x", "y", "z", "arr", "nums", "result", "res", "val", "data",
-                    # Common function names
-                    "main", "sum", "min", "max", "abs", "sort", "sorted", "reverse", "append", "extend",
-                    "insert", "remove", "pop", "clear", "index", "count", "copy", "deepcopy",
-                    # Common types and modules
-                    "object", "Exception", "TypeError", "ValueError", "RuntimeError",
-                    "os", "sys", "math", "random", "datetime", "collections", "itertools",
-                    # Type hints
-                    "List", "Dict", "Set", "Tuple", "Optional", "Union", "Any", "Callable", "Iterator",
-                    "Generator", "Sequence", "Mapping", "Iterable", "TypeVar", "Generic",
-                    # Docstring markers
-                    '"""', "'''", "Args:", "Returns:", "Raises:", "Example:", "Note:", "See Also:",
-                    # Common code patterns
-                    "def fibonacci(", "def fib(", "def calculate_fibonacci(",
-                    "for i in range(", "while i < ", "if __name__ == '__main__':",
-                    # Common Python builtins
-                    "enumerate", "zip", "reversed", "isinstance", "hasattr", "getattr", "setattr",
-                    "property", "staticmethod", "classmethod", "super", "next", "iter",
+                    "=", "<", ">",
+                    # Common words and subwords
+                    "the", "be", "to", "of", "and", "a", "in", "that", "have", "I",
+                    "it", "for", "not", "on", "with", "he", "as", "you", "do", "at",
+                    "this", "but", "his", "by", "from", "they", "we", "say", "her", "she",
+                    "or", "an", "will", "my", "one", "all", "would", "there", "their", "what",
+                    # Common prefixes and suffixes
+                    "un", "re", "in", "im", "dis", "en", "non", "fore", "de", "trans",
+                    "super", "semi", "anti", "mid", "sub",
+                    "ing", "ed", "s", "es", "ies", "ly", "ment", "ness", "ful", "less",
+                    "able", "ible", "al", "ial", "ic", "ical", "ious", "eous", "uous",
+                    # Numbers and units
+                    *[str(i) for i in range(10)],  # 0-9
+                    "k", "m", "b", "t",
                     # Add basic characters
                     *[chr(i) for i in range(ord('a'), ord('z')+1)],  # a-z
                     *[chr(i) for i in range(ord('A'), ord('Z')+1)],  # A-Z
-                    *[chr(i) for i in range(ord('0'), ord('9')+1)],  # 0-9
-                    # Common programming subwords
-                    *["_" + c for c in "abcdefghijklmnopqrstuvwxyz"],  # _a, _b, etc.
-                    *[c + "_" for c in "abcdefghijklmnopqrstuvwxyz"],  # a_, b_, etc.
-                    # Common Chinese characters (for multilingual support)
-                    *[chr(i) for i in range(0x4E00, 0x9FFF)]
+                    # Common bigrams and trigrams
+                    "th", "he", "an", "in", "er", "on", "re", "ed", "nd", "ha", "at", "en",
+                    "es", "or", "te", "ar", "al", "nt", "st", "ng",
+                    "the", "and", "ing", "her", "hat", "his", "tha", "ere", "for", "ent",
+                    "ion", "ter", "was", "you", "ith", "ver", "all", "wit", "thi", "tio",
+                    # Common programming terms (but not too specific)
+                    "def", "class", "return", "if", "else", "for", "while", "try", "except",
+                    "import", "from", "as", "pass", "break", "continue", "raise", "with",
+                    # Common variable names
+                    "i", "j", "k", "n", "x", "y", "z", "val", "data", "item", "result",
+                    # Multilingual support
+                    *[chr(i) for i in range(0x4E00, 0x9FFF)]  # Common Chinese characters
                 ]
                 # Write tokens to file
                 for token in basic_vocab:
@@ -110,7 +97,7 @@ class DeepSeekTokenizer:
                     '--model_type=unigram '
                     '--pad_id=0 --bos_id=1 --eos_id=2 --unk_id=3 '
                     '--control_symbols=<|user|>,<|assistant|>,<|system|> '
-                    '--user_defined_symbols=<s>,</s>,<pad>,```python,```,def,class '
+                    '--user_defined_symbols=<s>,</s>,<pad> '
                     '--treat_whitespace_as_suffix=true '
                     '--remove_extra_whitespaces=false '
                     '--byte_fallback=true '
