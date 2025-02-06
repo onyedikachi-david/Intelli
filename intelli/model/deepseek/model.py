@@ -83,7 +83,7 @@ class RotaryEmbedding(nn.Module):
         Returns:
             Tensor with rotary embeddings applied
         """
-        # Move inv_freq to correct device
+        # Move inv_freq to correct device and ensure proper shape
         self.inv_freq = self.inv_freq.to(x.device)
         
         # Get sequence length and compute position embeddings
@@ -95,22 +95,30 @@ class RotaryEmbedding(nn.Module):
         cos = torch.cos(freqs)  # [seq_len, dim/2]
         sin = torch.sin(freqs)  # [seq_len, dim/2]
         
-        # Reshape cos and sin for broadcasting
-        cos = cos.view(1, seq_len, 1, cos.shape[-1])  # [1, seq_len, 1, dim/2]
-        sin = sin.view(1, seq_len, 1, sin.shape[-1])  # [1, seq_len, 1, dim/2]
-        
-        # Ensure input tensor has correct shape by splitting last dimension
+        # Reshape x to split last dimension into pairs
         x_shape = x.shape
-        x_reshaped = x.view(x_shape[0], x_shape[1], x_shape[2], -1, 2)
-        x1, x2 = x_reshaped[..., 0], x_reshaped[..., 1]
+        x = x.view(x_shape[0], x_shape[1], x_shape[2], -1, 2)
+        
+        # Ensure cos and sin have correct shape for broadcasting
+        cos = cos.view(1, seq_len, 1, cos.shape[-1], 1)  # [1, seq_len, 1, dim/2, 1]
+        sin = sin.view(1, seq_len, 1, sin.shape[-1], 1)  # [1, seq_len, 1, dim/2, 1]
+        
+        # Split input into real and imaginary parts
+        x1, x2 = x[..., 0], x[..., 1]
+        x1 = x1.unsqueeze(-1)  # Add dimension for broadcasting
+        x2 = x2.unsqueeze(-1)  # Add dimension for broadcasting
         
         # Apply rotation using the RoPE formulation
-        rotated = torch.cat([
-            x1 * cos - x2 * sin,
-            x2 * cos + x1 * sin,
-        ], dim=-1)
+        y1 = x1 * cos - x2 * sin  # Real part
+        y2 = x2 * cos + x1 * sin  # Imaginary part
         
-        return rotated
+        # Combine real and imaginary parts
+        y = torch.cat([y1, y2], dim=-1)
+        
+        # Restore original shape
+        y = y.view(*x_shape)
+        
+        return y
 
 
 class Attention(nn.Module):
