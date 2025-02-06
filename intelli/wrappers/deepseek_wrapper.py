@@ -6,7 +6,7 @@ from typing import Optional, Dict, Any, List, Union
 from enum import Enum
 
 from intelli.model.deepseek.model import Transformer, ModelArgs
-from intelli.model.deepseek.loader import ModelLoader
+from intelli.model.deepseek.loader import ModelLoader, LazyTensor
 from intelli.model.deepseek.kernel import weight_dequant
 
 
@@ -184,8 +184,18 @@ class DeepSeekWrapper:
         args = ModelArgs(**model_config)
         self.model = Transformer(args).to(self.device)
         
-        # Load weights
-        self.model.load_state_dict(model_data["weights"])
+        # Materialize lazy tensors and remove "model." prefix from keys
+        state_dict = {}
+        for key, tensor in model_data["weights"].items():
+            if isinstance(tensor, LazyTensor):
+                tensor = tensor.materialize()
+            # Remove "model." prefix from key
+            if key.startswith("model."):
+                key = key[6:]  # Remove "model." prefix
+            state_dict[key] = tensor
+        
+        # Load state dict
+        self.model.load_state_dict(state_dict)
         self.model.eval()
         
     def update_params(self, **kwargs):
