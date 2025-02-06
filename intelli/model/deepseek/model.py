@@ -91,19 +91,27 @@ class RotaryEmbedding(nn.Module):
         t = torch.arange(start_pos, start_pos + seq_len, device=x.device)
         freqs = torch.einsum("i,j->ij", t, self.inv_freq)  # [seq_len, dim/2]
         
-        # Convert to complex numbers for rotation
-        x_complex = torch.view_as_complex(x.float().reshape(*x.shape[:-1], -1, 2))
-        freqs = torch.view_as_complex(torch.stack([torch.cos(freqs), torch.sin(freqs)], dim=-1))
+        # Compute cos and sin
+        cos = torch.cos(freqs)  # [seq_len, dim/2]
+        sin = torch.sin(freqs)  # [seq_len, dim/2]
         
-        # Reshape freqs for broadcasting
-        freqs = freqs.view(1, seq_len, 1, x_complex.shape[-1])
+        # Ensure input tensor has correct shape
+        x = x.view(*x.shape[:-1], -1, 2)  # [..., dim/2, 2]
         
-        # Apply rotation in complex space
-        x_rotated = x_complex * freqs
+        # Reshape cos and sin for broadcasting
+        cos = cos.view(1, seq_len, 1, -1)  # [1, seq_len, 1, dim/2]
+        sin = sin.view(1, seq_len, 1, -1)  # [1, seq_len, 1, dim/2]
         
-        # Convert back to real and restore original dtype
-        x_out = torch.view_as_real(x_rotated).flatten(start_dim=-2)
-        return x_out.type_as(x)
+        # Split input into half for rotation
+        x1, x2 = x.unbind(-1)  # [..., dim/2], [..., dim/2]
+        
+        # Apply rotation using the RoPE formulation
+        rotated = torch.cat([
+            x1 * cos - x2 * sin,
+            x2 * cos + x1 * sin,
+        ], dim=-1)
+        
+        return rotated
 
 
 class Attention(nn.Module):
