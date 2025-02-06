@@ -300,9 +300,16 @@ class ModelLoader:
             hidden_dim = 2048
             intermediate_dim = 5440
             num_attention_heads = 16
-            head_dim = hidden_dim // num_attention_heads
+            head_dim = 24  # Fixed head dimension from checkpoint
             num_key_value_heads = 8  # Number of KV heads for grouped attention
             num_key_value_groups = num_attention_heads // num_key_value_heads
+            
+            # Calculate attention dimensions
+            query_head_dim = 128  # Query head dimension
+            kv_head_dim = 24  # Key/Value head dimension
+            
+            # Calculate MLP dimensions
+            mlp_intermediate_dim = 6720  # From checkpoint
         else:
             # For other variants, use dimensions from the checkpoint
             if name == "model.embed_tokens.weight" or name == "lm_head.weight":
@@ -328,14 +335,16 @@ class ModelLoader:
             
             num_attention_heads = num_key_value_heads * 2  # Common ratio in transformer models
             num_key_value_groups = num_attention_heads // num_key_value_heads
+            query_head_dim = head_dim
+            kv_head_dim = head_dim
             
-            # Calculate intermediate_dim from MLP layers
+            # Calculate MLP dimensions from checkpoint
             for key in self.safetensors_header:
                 if "mlp.up_proj.weight" in key:
-                    intermediate_dim = self.safetensors_header[key]["shape"][0]
+                    mlp_intermediate_dim = self.safetensors_header[key]["shape"][0]
                     break
                 else:
-                    intermediate_dim = hidden_dim * 4  # Common ratio in transformer models
+                    mlp_intermediate_dim = hidden_dim * 4  # Common ratio in transformer models
         
         # Map tensor names to remove "model." prefix if present
         clean_name = name.replace("model.", "")
@@ -348,19 +357,19 @@ class ModelLoader:
                     shard_idx = int(clean_name.split(".")[-2])  # Get shard index
                     if shard_idx < num_key_value_heads:
                         if clean_name.endswith(".weight"):
-                            shape = (head_dim, hidden_dim)
+                            shape = (kv_head_dim, hidden_dim)  # Use KV head dimension
                         elif clean_name.endswith(".bias"):
-                            shape = (head_dim,)
+                            shape = (kv_head_dim,)  # Use KV head dimension
                 else:
                     # Query projection
                     if clean_name.endswith(".weight"):
-                        shape = (head_dim * num_attention_heads, hidden_dim)
+                        shape = (query_head_dim * num_attention_heads, hidden_dim)
                     elif clean_name.endswith(".bias"):
-                        shape = (head_dim * num_attention_heads,)
+                        shape = (query_head_dim * num_attention_heads,)
             elif "proj_b" in clean_name:
                 # Handle key/value projection second matrix
                 if clean_name.endswith(".weight"):
-                    shape = (hidden_dim, head_dim)
+                    shape = (hidden_dim, kv_head_dim)  # Use KV head dimension
             elif "o_proj" in clean_name:
                 # Output projection
                 if clean_name.endswith(".weight"):
@@ -375,17 +384,17 @@ class ModelLoader:
         elif "mlp." in clean_name:
             if clean_name.endswith(".weight"):
                 if "gate_proj" in clean_name or "up_proj" in clean_name:
-                    shape = (intermediate_dim, hidden_dim)
+                    shape = (mlp_intermediate_dim, hidden_dim)
                 elif "down_proj" in clean_name:
-                    shape = (hidden_dim, intermediate_dim)
+                    shape = (hidden_dim, mlp_intermediate_dim)
             elif clean_name.endswith(".bias"):
                 if "gate_proj" in clean_name or "up_proj" in clean_name:
-                    shape = (intermediate_dim,)
+                    shape = (mlp_intermediate_dim,)
                 elif "down_proj" in clean_name:
                     shape = (hidden_dim,)
         # Handle norm layers
         elif any(x in clean_name for x in ["norm.weight", "input_layernorm.weight", "post_attention_layernorm.weight"]):
-            shape = (hidden_dim,)
+            shape = original_shape  # Keep original shape for norm layers
         
         # Verify tensor size matches target shape
         target_size = np.prod(shape)
@@ -397,18 +406,14 @@ class ModelLoader:
             # For attention layers, try to adjust dimensions
             if "self_attn" in clean_name:
                 if "proj_a" in clean_name and clean_name.endswith(".weight"):
-                    # Adjust head dimension based on actual size
-                    head_dim = actual_size // hidden_dim
-                    shape = (head_dim, hidden_dim)
+                    # Keep original head dimension from checkpoint
+                    shape = original_shape
                 elif "proj_b" in clean_name and clean_name.endswith(".weight"):
-                    # Adjust for proj_b matrices
-                    shape = (hidden_dim, actual_size // hidden_dim)
-            # For MLP layers, try to adjust dimensions
-            elif "mlp." in clean_name and len(shape) == 2:
-                if actual_size % shape[1] == 0:
-                    shape = (actual_size // shape[1], shape[1])
-                elif actual_size % shape[0] == 0:
-                    shape = (shape[0], actual_size // shape[0])
+                    # Keep original head dimension from checkpoint
+                    shape = original_shape
+            # For MLP layers, keep original dimensions
+            elif "mlp." in clean_name:
+                shape = original_shape
             # For other tensors, keep original dimensions
             else:
                 print(f"Using original shape for {name}")
@@ -416,17 +421,6 @@ class ModelLoader:
         
         # Reshape and move to device
         try:
-            # Adjust shape based on actual size if needed
-            if actual_size != target_size:
-                if len(shape) == 2:
-                    # For 2D tensors, adjust the first dimension
-                    shape = (actual_size // shape[1], shape[1])
-                elif len(shape) == 1:
-                    # For 1D tensors, use the actual size
-                    shape = (actual_size,)
-                else:
-                    print(f"Warning: Using original shape for {name}")
-                    shape = original_shape
             tensor = tensor.reshape(shape)
         except ValueError as e:
             print(f"Error reshaping tensor {name}")
