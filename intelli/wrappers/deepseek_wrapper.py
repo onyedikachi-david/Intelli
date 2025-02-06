@@ -91,8 +91,12 @@ class DeepSeekWrapper:
         # Filter config to only include expected arguments
         model_config = {}
         expected_args = [
-            'dim', 'n_layers', 'n_heads', 'vocab_size', 'multiple_of',
-            'ffn_dim_multiplier', 'norm_eps', 'max_batch_size', 'max_seq_len'
+            'dim', 'n_layers', 'n_heads', 'vocab_size', 'max_batch_size', 'max_seq_len',
+            'dtype', 'inter_dim', 'moe_inter_dim', 'n_dense_layers', 'n_routed_experts',
+            'n_shared_experts', 'n_activated_experts', 'n_expert_groups', 'n_limited_groups',
+            'score_func', 'route_scale', 'q_lora_rank', 'kv_lora_rank', 'qk_nope_head_dim',
+            'qk_rope_head_dim', 'v_head_dim', 'original_seq_len', 'rope_theta', 'rope_factor',
+            'beta_fast', 'beta_slow', 'mscale'
         ]
         for key in expected_args:
             if key in self.config:
@@ -105,44 +109,73 @@ class DeepSeekWrapper:
                     "dim": 8192,
                     "n_layers": 80,
                     "n_heads": 64,
-                    "vocab_size": 32000
+                    "vocab_size": 32000,
+                    "max_seq_len": 8192,
+                    "max_batch_size": 32
                 })
             elif "32b" in self.model_variant.lower():
                 model_config.update({
                     "dim": 6144,
                     "n_layers": 60,
                     "n_heads": 48,
-                    "vocab_size": 32000
+                    "vocab_size": 32000,
+                    "max_seq_len": 8192,
+                    "max_batch_size": 32
                 })
             elif "14b" in self.model_variant.lower():
                 model_config.update({
                     "dim": 5120,
                     "n_layers": 40,
                     "n_heads": 40,
-                    "vocab_size": 32000
+                    "vocab_size": 32000,
+                    "max_seq_len": 8192,
+                    "max_batch_size": 32
                 })
             elif "8b" in self.model_variant.lower() or "7b" in self.model_variant.lower():
                 model_config.update({
                     "dim": 4096,
                     "n_layers": 32,
                     "n_heads": 32,
-                    "vocab_size": 32000
+                    "vocab_size": 32000,
+                    "max_seq_len": 8192,
+                    "max_batch_size": 32
                 })
             elif "1.5b" in self.model_variant.lower():
                 model_config.update({
                     "dim": 2048,
                     "n_layers": 24,
                     "n_heads": 16,
-                    "vocab_size": 32000
+                    "vocab_size": 32000,
+                    "max_seq_len": 8192,
+                    "max_batch_size": 32
                 })
         
         # Set default values for missing arguments
         defaults = {
-            'multiple_of': 256,
-            'ffn_dim_multiplier': None,
-            'norm_eps': 1e-5,
+            'dtype': 'bf16',
             'max_batch_size': 32,
-            'max_seq_len': 8192
+            'max_seq_len': 8192,
+            'inter_dim': 10944,
+            'moe_inter_dim': 1408,
+            'n_dense_layers': 1,
+            'n_routed_experts': 64,
+            'n_shared_experts': 2,
+            'n_activated_experts': 6,
+            'n_expert_groups': 1,
+            'n_limited_groups': 1,
+            'score_func': 'softmax',
+            'route_scale': 1.0,
+            'q_lora_rank': 0,
+            'kv_lora_rank': 512,
+            'qk_nope_head_dim': 128,
+            'qk_rope_head_dim': 64,
+            'v_head_dim': 128,
+            'original_seq_len': 4096,
+            'rope_theta': 10000.0,
+            'rope_factor': 40,
+            'beta_fast': 32,
+            'beta_slow': 1,
+            'mscale': 1.0
         }
         for key, value in defaults.items():
             if key not in model_config:
