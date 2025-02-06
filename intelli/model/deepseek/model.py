@@ -133,13 +133,15 @@ class Attention(nn.Module):
             nn.Linear(self.hidden_size, self.shard_size, bias=True)
             for _ in range(self.mp_size)
         ])
-        self.k_proj_b = nn.Linear(self.shard_size, self.hidden_size, bias=False)
+        # Note: k_proj_b takes input of size shard_size and outputs hidden_size
+        self.k_proj_b = nn.Linear(self.lora_rank, self.hidden_size, bias=False)
         
         self.v_proj_a = nn.ModuleList([
             nn.Linear(self.hidden_size, self.shard_size, bias=True)
             for _ in range(self.mp_size)
         ])
-        self.v_proj_b = nn.Linear(self.shard_size, self.hidden_size, bias=False)
+        # Note: v_proj_b takes input of size shard_size and outputs hidden_size
+        self.v_proj_b = nn.Linear(self.lora_rank, self.hidden_size, bias=False)
         
         self.o_proj = nn.Linear(self.hidden_size, self.hidden_size, bias=False)
         
@@ -229,7 +231,9 @@ class Attention(nn.Module):
             k_shard = self.k_proj_a[i](x)  # [B, T, shard_size]
             k_shards.append(k_shard)
         k = torch.cat(k_shards, dim=-1)  # [B, T, lora_rank]
-        k = self.k_proj_b(k)  # [B, T, hidden_size]
+        k = k.transpose(-1, -2)  # [B, lora_rank, T]
+        k = self.k_proj_b(k)  # [B, hidden_size, T]
+        k = k.transpose(-1, -2)  # [B, T, hidden_size]
         k = k.view(B, T, H, -1)  # [B, T, H, head_dim]
         
         # Value projection with LoRA and model parallel
@@ -238,7 +242,9 @@ class Attention(nn.Module):
             v_shard = self.v_proj_a[i](x)  # [B, T, shard_size]
             v_shards.append(v_shard)
         v = torch.cat(v_shards, dim=-1)  # [B, T, lora_rank]
-        v = self.v_proj_b(v)  # [B, T, hidden_size]
+        v = v.transpose(-1, -2)  # [B, lora_rank, T]
+        v = self.v_proj_b(v)  # [B, hidden_size, T]
+        v = v.transpose(-1, -2)  # [B, T, hidden_size]
         v = v.view(B, T, H, -1)  # [B, T, H, head_dim]
         
         # Apply rotary embeddings
