@@ -73,20 +73,12 @@ class DeepSeekWrapper:
         """Load model and tokenizer with optimizations."""
         loader = ModelLoader()
         
-        # Determine if we need device map for large models
-        device_map = None
-        if self.max_memory is not None:
-            device_map = "auto"
-            
         # Load model with optimizations
         model_data = loader.load_model(
             self.model_variant,
             device=self.device,
             quantize=self.quantize,
-            dtype=self.dtype,
-            use_flash_attention=self.use_flash_attention,
-            device_map=device_map,
-            max_memory=self.max_memory
+            dtype=self.dtype
         )
         
         # Initialize model
@@ -114,12 +106,8 @@ class DeepSeekWrapper:
         args = ModelArgs(**self.config)
         self.model = Transformer(args).to(self.device)
         
-        # Load weights with potential sharding for large models
-        if device_map is not None:
-            self.model.load_state_dict(model_data["weights"], strict=False)
-        else:
-            self.model.load_state_dict(model_data["weights"])
-            
+        # Load weights
+        self.model.load_state_dict(model_data["weights"])
         self.model.eval()
         
     def update_params(self, **kwargs):
