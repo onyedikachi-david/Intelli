@@ -216,7 +216,8 @@ class DeepSeekWrapper:
             # Get vocabulary sizes
             config_vocab_size = self.config["vocab_size"]
             tokenizer_vocab_size = self.tokenizer.sp_model.get_piece_size()
-            vocab_size = min(config_vocab_size, tokenizer_vocab_size)
+            # Use config vocab size since model was trained with this vocabulary
+            vocab_size = config_vocab_size
             print(f"Config vocab size: {config_vocab_size}")
             print(f"Tokenizer vocab size: {tokenizer_vocab_size}")
             print(f"Using vocab size: {vocab_size}")
@@ -258,9 +259,9 @@ class DeepSeekWrapper:
                 
                 # Get last token logits based on shape
                 if len(logits.shape) == 3:
-                    next_token_logits = logits[0, -1, :vocab_size].clone()  # Limit to vocab size
+                    next_token_logits = logits[0, -1].clone()  # Don't limit vocab size here
                 elif len(logits.shape) == 2:
-                    next_token_logits = logits[-1, :vocab_size].clone()  # Limit to vocab size
+                    next_token_logits = logits[-1].clone()  # Don't limit vocab size here
                 else:
                     raise ValueError(f"Unexpected logits shape: {logits.shape}")
                 
@@ -382,9 +383,9 @@ class DeepSeekWrapper:
                     
                     # Get next token logits based on shape
                     if len(logits.shape) == 3:
-                        next_token_logits = logits[0, -1, :vocab_size].clone()  # Limit to vocab size
+                        next_token_logits = logits[0, -1].clone()  # Don't limit vocab size here
                     elif len(logits.shape) == 2:
-                        next_token_logits = logits[-1, :vocab_size].clone()  # Limit to vocab size
+                        next_token_logits = logits[-1].clone()  # Don't limit vocab size here
                     
                     # Replace NaN/Inf values
                     next_token_logits = torch.where(
