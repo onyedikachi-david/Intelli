@@ -40,10 +40,21 @@ class DeepSeekTokenizer:
             print("No tokenizer files found, creating basic tokenizer...")
             import tempfile
             with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
-                # Write basic vocabulary
+                # Write basic vocabulary with special tokens first
                 basic_vocab = [
-                    "<|endoftext|>", "<|user|>", "<|assistant|>",
+                    "<|endoftext|>",
+                    "<|user|>",
+                    "<|assistant|>",
+                    "<|system|>",
+                    "<s>",
+                    "</s>",
+                    "<pad>",
                     ".", ",", "!", "?", "-", "'", '"', "\n",
+                    # Programming-specific tokens
+                    "def", "class", "return", "import", "from", "if", "else", "for", "while",
+                    "try", "except", "raise", "with", "as", "in", "is", "not", "and", "or",
+                    "True", "False", "None", "self", "__init__", "print", "range", "len",
+                    # Add basic characters
                     *[chr(i) for i in range(ord('a'), ord('z')+1)],  # a-z
                     *[chr(i) for i in range(ord('A'), ord('Z')+1)],  # A-Z
                     *[chr(i) for i in range(ord('0'), ord('9')+1)],  # 0-9
@@ -53,7 +64,7 @@ class DeepSeekTokenizer:
                     f.write(f"{token}\n")
                 f.flush()
                 
-                # Train basic model
+                # Train basic model with improved parameters
                 spm.SentencePieceTrainer.Train(
                     f'--input={f.name} '
                     f'--model_prefix={model_file[:-6]} '
@@ -61,7 +72,14 @@ class DeepSeekTokenizer:
                     '--character_coverage=0.9995 '
                     '--model_type=unigram '
                     '--pad_id=0 --bos_id=1 --eos_id=2 --unk_id=3 '
-                    '--control_symbols=<|user|>,<|assistant|>'
+                    '--control_symbols=<|user|>,<|assistant|>,<|system|> '
+                    '--user_defined_symbols=<s>,</s>,<pad> '
+                    '--treat_whitespace_as_suffix=true '
+                    '--remove_extra_whitespaces=false '
+                    '--byte_fallback=true '
+                    '--normalization_rule_name=identity '
+                    '--add_dummy_prefix=false '
+                    '--max_sentence_length=8192'
                 )
                 
                 # Clean up
@@ -78,13 +96,35 @@ class DeepSeekTokenizer:
         else:
             self.config = {}
         
-        # Set special tokens
-        self.pad_token_id = self.config.get('pad_token_id', 0)
-        self.eos_token_id = self.config.get('eos_token_id', 2)
-        self.bos_token_id = self.config.get('bos_token_id', 1)
+        # Set special tokens with defaults
+        self.pad_token = "<pad>"
+        self.bos_token = "<s>"
+        self.eos_token = "</s>"
+        self.user_token = "<|user|>"
+        self.assistant_token = "<|assistant|>"
+        self.system_token = "<|system|>"
         
-        # Set chat template
-        self.chat_template = self.config.get('chat_template', "{%- for message in messages -%}\n{% if message['role'] == 'user' %}\n{{ '<|user|>\n' + message['content'] + '\n<|assistant|>\n' }}\n{% elif message['role'] == 'assistant' %}\n{{ message['content'] + '\n' }}\n{% endif %}\n{%- endfor -%}")
+        # Get token IDs
+        self.pad_token_id = self.sp_model.piece_to_id(self.pad_token)
+        self.bos_token_id = self.sp_model.piece_to_id(self.bos_token)
+        self.eos_token_id = self.sp_model.piece_to_id(self.eos_token)
+        self.user_token_id = self.sp_model.piece_to_id(self.user_token)
+        self.assistant_token_id = self.sp_model.piece_to_id(self.assistant_token)
+        self.system_token_id = self.sp_model.piece_to_id(self.system_token)
+        
+        # Set chat template with improved formatting
+        self.chat_template = self.config.get('chat_template', """
+{%- for message in messages -%}
+{%- if message['role'] == 'system' -%}
+{{ '<|system|>\n' + message['content'] + '\n' }}
+{%- elif message['role'] == 'user' -%}
+{{ '<|user|>\n' + message['content'] + '\n' }}
+{%- elif message['role'] == 'assistant' -%}
+{{ '<|assistant|>\n' + message['content'] + '\n' }}
+{%- endif -%}
+{%- endfor -%}
+<|assistant|>
+""".strip())
     
     def _write_spm_model(self, output_path: str):
         """Write a SentencePiece model file from JSON vocab."""
@@ -184,9 +224,9 @@ class DeepSeekTokenizer:
                 self.pad_token_id,
                 self.bos_token_id,
                 self.eos_token_id,
-                self.sp_model.piece_to_id('<|user|>'),
-                self.sp_model.piece_to_id('<|assistant|>'),
-                self.sp_model.piece_to_id('<|endoftext|>')
+                self.user_token_id,
+                self.assistant_token_id,
+                self.system_token_id
             }
             # Filter out special tokens
             ids = [id for id in ids if id not in special_tokens and id != -1]
@@ -196,7 +236,7 @@ class DeepSeekTokenizer:
         
         # Clean up any remaining special token text
         if skip_special_tokens:
-            special_strings = ['<|endoftext|>', '<|user|>', '<|assistant|>']
+            special_strings = ['<|endoftext|>', '<|user|>', '<|assistant|>', '<|system|>']
             for s in special_strings:
                 text = text.replace(s, '')
         

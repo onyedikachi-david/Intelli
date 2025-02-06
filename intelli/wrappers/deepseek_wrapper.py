@@ -295,8 +295,11 @@ class DeepSeekWrapper:
             temp_params = {k: getattr(self, k) for k in ['temperature', 'top_p', 'top_k', 'max_length', 'repetition_penalty']}
             self.update_params(**kwargs)
         
-        # Tokenize input
-        input_ids = self.tokenizer.encode(prompt)
+        # Format prompt using chat template
+        messages = [
+            {"role": "user", "content": prompt}
+        ]
+        input_ids = self.tokenizer.apply_chat_template(messages)
         input_ids = torch.tensor(input_ids, dtype=torch.long, device=self.device).unsqueeze(0)
         
         # Track generated tokens for repetition penalty
@@ -359,11 +362,14 @@ class DeepSeekWrapper:
                 input_ids = torch.cat([input_ids, next_token.unsqueeze(0)], dim=1)
                 
                 # Print progress
-                print(f"\rProcessing token {i+1}/{self.max_length} | Last token: '{self.tokenizer.decode([next_token.item()])}'", end="", flush=True)
+                token_text = self.tokenizer.decode([next_token.item()], skip_special_tokens=True)
+                if token_text:  # Only print if token produces visible text
+                    print(f"\rProcessing token {i+1}/{self.max_length} | Last token: '{token_text}'", end="", flush=True)
                 
-                # Stop if we hit the EOS token
-                if next_token.item() == self.tokenizer.eos_token_id:
-                    print("\nGeneration complete: EOS token reached")
+                # Stop if we hit the EOS token or assistant end token
+                if (next_token.item() == self.tokenizer.eos_token_id or 
+                    next_token.item() == self.tokenizer.sp_model.piece_to_id('<|user|>')):
+                    print("\nGeneration complete: End token reached")
                     break
         
         print("\n")  # New line after generation
@@ -372,9 +378,15 @@ class DeepSeekWrapper:
         if kwargs:
             self.update_params(**temp_params)
         
-        # Decode and clean up the generated text
-        generated_text = self.tokenizer.decode(input_ids[0].tolist(), skip_special_tokens=True)
-        return generated_text.strip()
+        # Extract only the assistant's response from the generated text
+        full_text = self.tokenizer.decode(input_ids[0].tolist(), skip_special_tokens=True)
+        try:
+            # Try to extract just the response part after the prompt
+            response = full_text.split(prompt, 1)[1]
+        except IndexError:
+            response = full_text
+        
+        return response.strip()
     
     def __call__(self, prompt: str, **kwargs) -> str:
         """Alias for generate method."""
