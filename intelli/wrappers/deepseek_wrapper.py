@@ -93,7 +93,7 @@ class DeepSeekWrapper:
             'dim': self.config["hidden_size"],
             'n_layers': self.config["num_hidden_layers"],
             'n_heads': self.config["num_attention_heads"],
-            'vocab_size': self.config["vocab_size"],
+            'vocab_size': self.config["vocab_size"],  # Use full vocab size from config
             'max_seq_len': self.config["max_sequence_length"],
             'max_batch_size': 32,
             'inter_dim': self.config["intermediate_size"],
@@ -164,9 +164,37 @@ class DeepSeekWrapper:
                 state_dict[key] = tensor
         
         # Load state dict
-        self.model.load_state_dict(state_dict)
+        missing_keys, unexpected_keys = self.model.load_state_dict(state_dict, strict=False)
+        if missing_keys:
+            print(f"Warning: Missing keys in state dict: {missing_keys}")
+        if unexpected_keys:
+            print(f"Warning: Unexpected keys in state dict: {unexpected_keys}")
+            
+        # Set model to evaluation mode
         self.model.eval()
         
+        # Verify model loaded correctly
+        print("\nModel initialization:")
+        print(f"Model device: {next(self.model.parameters()).device}")
+        print(f"Model dtype: {next(self.model.parameters()).dtype}")
+        print(f"Vocab size: {self.model.args.vocab_size}")
+        print(f"Hidden size: {self.model.args.dim}")
+        print(f"Num layers: {self.model.args.n_layers}")
+        print(f"Num heads: {self.model.args.n_heads}")
+        
+        # Test forward pass
+        with torch.no_grad():
+            test_input = torch.ones((1, 1), dtype=torch.long, device=self.device)
+            try:
+                test_output = self.model(test_input)
+                print("Test forward pass successful")
+                print(f"Output shape: {test_output.shape}")
+                print(f"Output dtype: {test_output.dtype}")
+                print(f"Output device: {test_output.device}")
+            except Exception as e:
+                print(f"Test forward pass failed: {str(e)}")
+                raise
+
     def update_params(self, **kwargs):
         """
         Update generation parameters.
@@ -216,8 +244,8 @@ class DeepSeekWrapper:
             # Get vocabulary sizes
             config_vocab_size = self.config["vocab_size"]
             tokenizer_vocab_size = self.tokenizer.sp_model.get_piece_size()
-            # Use tokenizer vocab size since that's what we can actually decode
-            vocab_size = tokenizer_vocab_size
+            # Use config vocab size since model was trained with this vocabulary
+            vocab_size = config_vocab_size
             print(f"Config vocab size: {config_vocab_size}")
             print(f"Tokenizer vocab size: {tokenizer_vocab_size}")
             print(f"Using vocab size: {vocab_size}")
@@ -242,6 +270,8 @@ class DeepSeekWrapper:
                 # Debug input shape
                 print(f"Input shape: {input_ids.shape}")
                 
+                # Forward pass with gradient checkpointing disabled
+                self.model.gradient_checkpointing = False
                 outputs = self.model(input_ids)
                 
                 # Handle different output formats
@@ -253,72 +283,66 @@ class DeepSeekWrapper:
                 # Print shape info for debugging
                 print(f"Model output shape: {logits.shape}")
                 print(f"Output dtype: {logits.dtype}")
+                print(f"Output device: {logits.device}")
                 
                 # Convert to float32 for better numerical stability
                 logits = logits.to(torch.float32)
                 
                 # Get last token logits based on shape
                 if len(logits.shape) == 3:
-                    # Get full logits first
                     next_token_logits = logits[0, -1].clone()
-                    # Create a mask for valid token IDs
-                    valid_tokens_mask = torch.zeros_like(next_token_logits, dtype=torch.bool)
-                    valid_tokens_mask[:vocab_size] = True
-                    # Set invalid token logits to large negative value
-                    next_token_logits = torch.where(
-                        valid_tokens_mask,
-                        next_token_logits,
-                        torch.full_like(next_token_logits, float('-inf'))
-                    )
                 elif len(logits.shape) == 2:
-                    # Same for 2D logits
                     next_token_logits = logits[-1].clone()
-                    valid_tokens_mask = torch.zeros_like(next_token_logits, dtype=torch.bool)
-                    valid_tokens_mask[:vocab_size] = True
-                    next_token_logits = torch.where(
-                        valid_tokens_mask,
-                        next_token_logits,
-                        torch.full_like(next_token_logits, float('-inf'))
-                    )
                 else:
                     raise ValueError(f"Unexpected logits shape: {logits.shape}")
                 
-                # Replace NaN/Inf values with large negative numbers only for valid tokens
-                next_token_logits = torch.where(
-                    torch.isnan(next_token_logits) | torch.isinf(next_token_logits),
-                    torch.full_like(next_token_logits, -1e4),
-                    next_token_logits
+                # Print raw logits stats
+                print(f"Raw logits - min: {next_token_logits.min().item():.2f}, max: {next_token_logits.max().item():.2f}, mean: {next_token_logits.mean().item():.2f}")
+                
+                # Create mapping between model and tokenizer vocabularies
+                model_vocab_size = self.model.args.vocab_size
+                tokenizer_vocab_size = self.tokenizer.sp_model.get_piece_size()
+                
+                # Create vocabulary mapping tensor
+                vocab_map = torch.arange(model_vocab_size, device=self.device)
+                vocab_map[tokenizer_vocab_size:] = self.tokenizer.sp_model.unk_id()
+                
+                # Map logits to tokenizer vocabulary
+                mapped_logits = next_token_logits.index_select(0, vocab_map)
+                
+                # Replace NaN/Inf values
+                mapped_logits = torch.where(
+                    torch.isnan(mapped_logits) | torch.isinf(mapped_logits),
+                    torch.full_like(mapped_logits, -1e4),
+                    mapped_logits
                 )
                 
                 # Check for inf/nan values after replacement
-                print(f"Has inf values after fix: {torch.isinf(next_token_logits).any().item()}")
-                print(f"Has nan values after fix: {torch.isnan(next_token_logits).any().item()}")
+                print(f"Has inf values after fix: {torch.isinf(mapped_logits).any().item()}")
+                print(f"Has nan values after fix: {torch.isnan(mapped_logits).any().item()}")
                 
-                # Print initial logits stats for debugging
-                valid_logits = next_token_logits[:vocab_size]
-                print(f"Initial logits - min: {valid_logits.min().item():.2f}, max: {valid_logits.max().item():.2f}, mean: {valid_logits.mean().item():.2f}")
+                # Print mapped logits stats
+                print(f"Mapped logits - min: {mapped_logits.min().item():.2f}, max: {mapped_logits.max().item():.2f}, mean: {mapped_logits.mean().item():.2f}")
                 
                 for i in range(self.max_length):
-                    # Apply repetition penalty only to valid tokens
+                    # Apply repetition penalty
                     if len(generated) > 0:
                         for token in generated:
-                            if token < vocab_size:  # Only apply to valid token IDs
-                                if next_token_logits[token] > 0:
-                                    next_token_logits[token] /= self.repetition_penalty
+                            if token < tokenizer_vocab_size:
+                                if mapped_logits[token] > 0:
+                                    mapped_logits[token] /= self.repetition_penalty
                                 else:
-                                    next_token_logits[token] *= self.repetition_penalty
+                                    mapped_logits[token] *= self.repetition_penalty
                     
                     # Apply temperature scaling
                     if self.temperature > 0:
-                        scaled_logits = next_token_logits / max(self.temperature, 1e-6)
+                        scaled_logits = mapped_logits / max(self.temperature, 1e-6)
                     else:
-                        scaled_logits = next_token_logits
+                        scaled_logits = mapped_logits
                     
-                    # Apply top-k filtering only to valid tokens
+                    # Apply top-k filtering
                     if self.top_k > 0:
-                        # Get top-k only from valid tokens
-                        valid_logits = scaled_logits[:vocab_size]
-                        values, _ = torch.topk(valid_logits, min(self.top_k, vocab_size))
+                        values, _ = torch.topk(scaled_logits, min(self.top_k, tokenizer_vocab_size))
                         min_value = values[-1]
                         scaled_logits = torch.where(
                             scaled_logits < min_value,
@@ -326,73 +350,45 @@ class DeepSeekWrapper:
                             scaled_logits
                         )
                     
-                    # Apply top-p (nucleus) filtering only to valid tokens
+                    # Apply top-p filtering
                     if self.top_p < 1.0:
-                        # Sort only valid tokens
-                        valid_logits = scaled_logits[:vocab_size]
-                        sorted_logits, sorted_indices = torch.sort(valid_logits, descending=True)
+                        sorted_logits, sorted_indices = torch.sort(scaled_logits, descending=True)
                         cumulative_probs = torch.softmax(sorted_logits, dim=-1).cumsum(dim=-1)
                         
-                        # Remove tokens with cumulative probability above the threshold
                         sorted_indices_to_remove = cumulative_probs > self.top_p
                         sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
                         sorted_indices_to_remove[..., 0] = 0
                         
-                        # Map back to original indices
                         indices_to_remove = sorted_indices[sorted_indices_to_remove]
-                        scaled_logits[:vocab_size][indices_to_remove] = float('-inf')
+                        scaled_logits[indices_to_remove] = float('-inf')
                     
-                    # Ensure finite values for softmax (only for valid tokens)
-                    valid_logits = scaled_logits[:vocab_size]
-                    max_logit = valid_logits.max()
-                    valid_logits = valid_logits - max_logit
-                    scaled_logits[:vocab_size] = valid_logits
-                    
-                    # Handle any remaining inf values for valid tokens
-                    scaled_logits[:vocab_size] = torch.where(
-                        torch.isinf(valid_logits),
-                        torch.full_like(valid_logits, -1e4),
-                        valid_logits
-                    )
-                    
-                    # Apply softmax only to valid tokens
-                    valid_logits = scaled_logits[:vocab_size]
-                    exp_logits = torch.exp(valid_logits)
-                    probs = torch.zeros_like(scaled_logits)
-                    probs[:vocab_size] = exp_logits / (exp_logits.sum() + 1e-10)
+                    # Apply softmax
+                    probs = torch.softmax(scaled_logits, dim=-1)
                     
                     # Debug probability distribution
                     if i == 0:
-                        valid_probs = probs[:vocab_size]
-                        print(f"Probability sum: {valid_probs.sum().item():.6f}")
-                        print(f"Max probability: {valid_probs.max().item():.6f}")
-                        print(f"Has valid distribution: {(valid_probs >= 0).all().item() and (valid_probs <= 1).all().item()}")
-                        top_probs, top_indices = valid_probs.topk(5)
+                        print(f"Probability sum: {probs.sum().item():.6f}")
+                        print(f"Max probability: {probs.max().item():.6f}")
+                        print(f"Has valid distribution: {(probs >= 0).all().item() and (probs <= 1).all().item()}")
+                        top_probs, top_indices = probs.topk(5)
                         print(f"Top 5 probabilities: {top_probs.tolist()}")
                         print(f"Top 5 token IDs: {top_indices.tolist()}")
-                        # Print actual tokens for debugging
                         print("Top 5 tokens:", [self.tokenizer.decode([idx.item()]) for idx in top_indices])
                     
-                    # Ensure valid probabilities
-                    if torch.isnan(probs).any() or (probs[:vocab_size].sum() - 1.0).abs() > 1e-3:
-                        print("\nWarning: Invalid probabilities detected, falling back to greedy selection")
-                        # Use argmax only on valid tokens
-                        next_token = torch.argmax(scaled_logits[:vocab_size]).reshape(1)
-                    else:
-                        # Sample only from valid tokens
-                        next_token = torch.multinomial(probs[:vocab_size], num_samples=1)
+                    # Sample next token
+                    next_token = torch.multinomial(probs, num_samples=1)
+                    token_id = next_token.item()
                     
                     # Validate token ID
-                    token_id = next_token.item()
-                    if token_id >= vocab_size or token_id < 0:
+                    if token_id >= tokenizer_vocab_size:
                         print(f"\nWarning: Token ID {token_id} out of range, using UNK token")
                         token_id = self.tokenizer.sp_model.unk_id()
                         next_token = torch.tensor([token_id], device=self.device)
                     
-                    # Try decoding the token to validate it
+                    # Try decoding the token
                     try:
                         token_text = self.tokenizer.decode([token_id], skip_special_tokens=True)
-                        if not token_text:  # If empty string returned
+                        if not token_text:
                             print(f"\nWarning: Empty token text for ID {token_id}, using UNK token")
                             token_id = self.tokenizer.sp_model.unk_id()
                             next_token = torch.tensor([token_id], device=self.device)
@@ -403,81 +399,59 @@ class DeepSeekWrapper:
                         next_token = torch.tensor([token_id], device=self.device)
                         token_text = self.tokenizer.decode([token_id], skip_special_tokens=True)
                     
-                    # Add the chosen token to the sequence
+                    # Add token to sequence
                     generated.append(token_id)
-                    
-                    # Reshape next_token to match input_ids dimensions [batch_size, seq_len]
-                    next_token = next_token.unsqueeze(0)  # Add batch dimension
+                    next_token = next_token.unsqueeze(0)
                     input_ids = torch.cat([input_ids, next_token], dim=1)
                     
-                    # Get next token's logits
+                    # Update response text
+                    if token_text:
+                        response_text += token_text
+                        if token_text.isspace():
+                            consecutive_spaces += 1
+                        else:
+                            consecutive_spaces = 0
+                        print(f"\rGenerated ({i+1} tokens): {response_text}", end="", flush=True)
+                    
+                    # Get next token logits
                     outputs = self.model(input_ids)
                     if isinstance(outputs, tuple):
                         logits = outputs[0]
                     else:
                         logits = outputs
                     
-                    # Convert to float32 for better numerical stability
                     logits = logits.to(torch.float32)
                     
-                    # Get next token logits based on shape
                     if len(logits.shape) == 3:
-                        # Get full logits first
                         next_token_logits = logits[0, -1].clone()
-                        # Create a mask for valid token IDs
-                        valid_tokens_mask = torch.zeros_like(next_token_logits, dtype=torch.bool)
-                        valid_tokens_mask[:vocab_size] = True
-                        # Set invalid token logits to large negative value
-                        next_token_logits = torch.where(
-                            valid_tokens_mask,
-                            next_token_logits,
-                            torch.full_like(next_token_logits, float('-inf'))
-                        )
                     elif len(logits.shape) == 2:
-                        # Same for 2D logits
                         next_token_logits = logits[-1].clone()
-                        valid_tokens_mask = torch.zeros_like(next_token_logits, dtype=torch.bool)
-                        valid_tokens_mask[:vocab_size] = True
-                        next_token_logits = torch.where(
-                            valid_tokens_mask,
-                            next_token_logits,
-                            torch.full_like(next_token_logits, float('-inf'))
-                        )
                     
-                    # Replace NaN/Inf values only for valid tokens
-                    next_token_logits[:vocab_size] = torch.where(
-                        torch.isnan(next_token_logits[:vocab_size]) | torch.isinf(next_token_logits[:vocab_size]),
-                        torch.full_like(next_token_logits[:vocab_size], -1e4),
-                        next_token_logits[:vocab_size]
+                    # Map logits to tokenizer vocabulary
+                    mapped_logits = next_token_logits.index_select(0, vocab_map)
+                    
+                    # Replace NaN/Inf values
+                    mapped_logits = torch.where(
+                        torch.isnan(mapped_logits) | torch.isinf(mapped_logits),
+                        torch.full_like(mapped_logits, -1e4),
+                        mapped_logits
                     )
-                    
-                    if token_text:
-                        response_text += token_text
-                        # Update consecutive spaces counter
-                        if token_text.isspace():
-                            consecutive_spaces += 1
-                        else:
-                            consecutive_spaces = 0
-                        # Print progress
-                        print(f"\rGenerated ({i+1} tokens): {response_text}", end="", flush=True)
                     
                     # Check for stop conditions
                     if token_id in [self.tokenizer.eos_token_id, self.tokenizer.user_token_id]:
                         print("\nGeneration complete: End token reached")
                         break
-                    elif consecutive_spaces >= 5:  # Reduced threshold for consecutive spaces
+                    elif consecutive_spaces >= 5:
                         print("\nGeneration complete: Multiple spaces detected")
                         break
                     elif len(response_text) > 0 and not response_text[-1].strip():
-                        # Check if we've hit a natural stopping point (sentence end + space)
                         last_char = response_text.rstrip()[-1] if response_text.rstrip() else ""
                         if last_char in ".!?" and i > 20:
                             print("\nGeneration complete: Natural end point reached")
                             break
             
-            print("\n")  # New line after generation
+            print("\n")
             
-            # Restore original parameters if they were temporarily overridden
             if kwargs:
                 self.update_params(**temp_params)
             
