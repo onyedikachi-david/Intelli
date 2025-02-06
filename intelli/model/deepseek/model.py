@@ -113,16 +113,29 @@ class RotaryEmbedding(nn.Module):
 
 
 class Attention(nn.Module):
-    """Multi-head attention with support for rotary embeddings."""
+    """Multi-head attention with support for rotary embeddings and LoRA-style projections."""
     def __init__(self, args: ModelArgs):
         super().__init__()
         self.n_heads = args.n_heads
         self.head_dim = args.dim // args.n_heads
         
-        # All projections use the same dimension
+        # Compute dimensions for different attention components
+        self.qk_nope_dim = args.qk_nope_head_dim * args.n_heads
+        self.qk_rope_dim = args.qk_rope_head_dim * args.n_heads
+        self.v_dim = args.v_head_dim * args.n_heads
+        
+        # Query uses full dimension with split between RoPE and non-RoPE parts
         self.q_proj = nn.Linear(args.dim, args.dim, bias=True)
-        self.k_proj = nn.Linear(args.dim, args.dim, bias=True)
-        self.v_proj = nn.Linear(args.dim, args.dim, bias=True)
+        
+        # Key/Value use LoRA-style projections for dimension reduction
+        self.k_proj_a = nn.Linear(args.dim, args.kv_lora_rank, bias=True)
+        self.k_proj_b = nn.Linear(args.kv_lora_rank, 256, bias=True)  # 256 = qk_nope_dim + qk_rope_dim per head
+        self.k_norm = nn.LayerNorm(args.kv_lora_rank)
+        
+        self.v_proj_a = nn.Linear(args.dim, args.kv_lora_rank, bias=True)
+        self.v_proj_b = nn.Linear(args.kv_lora_rank, 256, bias=True)  # 256 = v_head_dim per head
+        self.v_norm = nn.LayerNorm(args.kv_lora_rank)
+        
         self.o_proj = nn.Linear(args.dim, args.dim, bias=False)
         
         self.rope = RotaryEmbedding(args)
@@ -138,32 +151,33 @@ class Attention(nn.Module):
     def forward(self, x: torch.Tensor, start_pos: int, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         B, T, C = x.size()
         H = self.n_heads
-        HD = self.head_dim
         
-        # Linear projections with consistent dimensions
-        q = self.q_proj(x).view(B, T, H, HD)  # [B, T, H, head_dim]
-        k = self.k_proj(x).view(B, T, H, HD)  # [B, T, H, head_dim]
-        v = self.v_proj(x).view(B, T, H, HD)  # [B, T, H, head_dim]
+        # Query projection with split dimensions
+        q = self.q_proj(x)  # [B, T, C]
+        q = q.view(B, T, H, -1)  # [B, T, H, head_dim]
         
-        # Apply rotary embeddings only to the query and key projections
-        q_rope_dim = min(HD, self.rope_dim * 2)  # Ensure we don't exceed tensor dimensions
-        k_rope_dim = q_rope_dim  # Same dimension for key
+        # Key projection with LoRA
+        k = self.k_proj_a(x)  # [B, T, kv_lora_rank]
+        k = self.k_norm(k)
+        k = self.k_proj_b(k)  # [B, T, 256]
+        k = k.view(B, T, 1, 256).expand(B, T, H, 256)  # [B, T, H, 256]
         
-        # Apply RoPE to query
-        q_rope = q[..., :q_rope_dim]
-        q_rope = self.rope(q_rope, start_pos)
-        if HD > q_rope_dim:
+        # Value projection with LoRA
+        v = self.v_proj_a(x)  # [B, T, kv_lora_rank]
+        v = self.v_norm(v)
+        v = self.v_proj_b(v)  # [B, T, 256]
+        v = v.view(B, T, 1, 256).expand(B, T, H, 256)  # [B, T, H, 256]
+        
+        # Apply rotary embeddings only to the RoPE part of query and key
+        q_rope_dim = self.rope_dim * 2  # Multiply by 2 since we need pairs for rotation
+        q_rope = q[..., :q_rope_dim]  # [B, T, H, rope_dim*2]
+        q_rope = self.rope(q_rope, start_pos)  # Apply RoPE
+        
+        # Concatenate RoPE and non-RoPE parts
+        if q.shape[-1] > q_rope_dim:
             q = torch.cat([q_rope, q[..., q_rope_dim:]], dim=-1)
         else:
             q = q_rope
-            
-        # Apply RoPE to key
-        k_rope = k[..., :k_rope_dim]
-        k_rope = self.rope(k_rope, start_pos)
-        if HD > k_rope_dim:
-            k = torch.cat([k_rope, k[..., k_rope_dim:]], dim=-1)
-        else:
-            k = k_rope
         
         # Compute attention
         attn = torch.einsum("bthd,bshd->bhts", q, k) * self.scale
