@@ -317,10 +317,20 @@ class ModelLoader:
             progress_callback: Optional callback for progress updates
             
         Returns:
-            Dictionary of model tensors
+            Dictionary containing model components (config, tokenizer, weights)
         """
         self.quantize = quantize
         self.dtype = dtype or self.dtype
+        
+        # Load config
+        config_path = os.path.join(model_path, "config.json")
+        if not os.path.exists(config_path):
+            raise FileNotFoundError(f"Config file not found at {config_path}")
+        with open(config_path) as f:
+            config = json.load(f)
+            
+        # Load tokenizer
+        tokenizer = DeepSeekTokenizer(model_path)
         
         # Initialize memory mappings
         self._init_mappings(model_path)
@@ -336,7 +346,12 @@ class ModelLoader:
                 progress = self.size_done / self.size_data
                 progress_callback(progress)
         
-        return tensors
+        return {
+            "config": config,
+            "tokenizer": tokenizer,
+            "weights": tensors,
+            "device": device
+        }
 
 
 class LazyTensor:

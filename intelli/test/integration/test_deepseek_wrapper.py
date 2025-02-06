@@ -220,26 +220,32 @@ def test_model_loading(model_loader):
     model_path = model_loader.download_from_hf("deepseek-ai/deepseek-v3-7b")
     
     # Test loading without quantization
-    tensors = model_loader.load_model(
+    model_data = model_loader.load_model(
         model_path=model_path,
         device="cuda" if torch.cuda.is_available() else "cpu",
         quantize=False
     )
-    assert isinstance(tensors, dict)
-    assert len(tensors) > 0
+    assert isinstance(model_data, dict)
+    assert "config" in model_data
+    assert "tokenizer" in model_data
+    assert "weights" in model_data
+    assert "device" in model_data
     
     # Test loading with quantization
     model_loader.quantize = True
-    tensors = model_loader.load_model(
+    model_data = model_loader.load_model(
         model_path=model_path,
         device="cuda" if torch.cuda.is_available() else "cpu",
         quantize=True
     )
-    assert isinstance(tensors, dict)
-    assert len(tensors) > 0
+    assert isinstance(model_data, dict)
+    assert "config" in model_data
+    assert "tokenizer" in model_data
+    assert "weights" in model_data
+    assert "device" in model_data
     
     # Verify tensor dtypes
-    for tensor in tensors.values():
+    for tensor in model_data["weights"].values():
         if model_loader.quantize:
             assert tensor.dtype in [torch.float8_e4m3fn, torch.float16]
         else:
@@ -259,7 +265,7 @@ def test_memory_mapping(model_loader):
     
     # Test memory efficiency
     initial_memory = torch.cuda.memory_allocated() if torch.cuda.is_available() else 0
-    tensors = model_loader.load_model(
+    model_data = model_loader.load_model(
         model_path=model_path,
         device="cuda" if torch.cuda.is_available() else "cpu"
     )
@@ -281,14 +287,14 @@ def test_quantization(model_loader):
     # Test FP8 quantization
     model_loader.quantize = True
     model_loader.dtype = torch.float8_e4m3fn
-    tensors = model_loader.load_model(
+    model_data = model_loader.load_model(
         model_path=model_path,
         device="cuda",
         quantize=True
     )
     
     # Verify quantized tensors
-    for tensor in tensors.values():
+    for tensor in model_data["weights"].values():
         if hasattr(tensor, 'scale'):
             assert tensor.dtype == torch.float8_e4m3fn
             assert tensor.scale is not None
