@@ -73,9 +73,12 @@ class DeepSeekWrapper:
         """Load model and tokenizer with optimizations."""
         loader = ModelLoader()
         
+        # Download model files if needed
+        model_path = loader.download_from_hf(self.model_variant)
+        
         # Load model with optimizations
         model_data = loader.load_model(
-            self.model_variant,
+            model_path,
             device=self.device,
             quantize=self.quantize,
             dtype=self.dtype
