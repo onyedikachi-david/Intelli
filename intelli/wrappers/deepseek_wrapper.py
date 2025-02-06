@@ -306,34 +306,64 @@ class DeepSeekWrapper:
         for _ in range(self.max_length):
             with torch.no_grad():
                 outputs = self.model(input_ids)
-                next_token_logits = outputs[0, -1, :]
+                next_token_logits = outputs[0, -1, :].float()  # Ensure float type
                 
-                # Apply temperature
-                next_token_logits = next_token_logits / self.temperature
-                
-                # Apply repetition penalty
+                # Apply repetition penalty first
                 if len(generated) > 0:
                     for token in generated:
                         next_token_logits[token] /= self.repetition_penalty
                 
+                # Apply temperature scaling
+                if self.temperature != 0:
+                    next_token_logits = next_token_logits / self.temperature
+                else:
+                    # If temperature is 0, we do greedy sampling
+                    next_token = torch.argmax(next_token_logits).unsqueeze(0)
+                    generated.append(next_token.item())
+                    input_ids = torch.cat([input_ids, next_token.unsqueeze(0)], dim=1)
+                    if next_token.item() == self.tokenizer.eos_token_id:
+                        break
+                    continue
+                
                 # Apply top-k filtering
                 if self.top_k > 0:
-                    indices_to_remove = next_token_logits < torch.topk(next_token_logits, self.top_k)[0][..., -1, None]
+                    top_k = min(self.top_k, next_token_logits.size(-1))
+                    indices_to_remove = next_token_logits < torch.topk(next_token_logits, top_k)[0][..., -1, None]
                     next_token_logits[indices_to_remove] = float('-inf')
                 
                 # Apply top-p (nucleus) filtering
                 if self.top_p < 1.0:
                     sorted_logits, sorted_indices = torch.sort(next_token_logits, descending=True)
                     cumulative_probs = torch.cumsum(torch.softmax(sorted_logits, dim=-1), dim=-1)
+                    
+                    # Remove tokens with cumulative probability above the threshold
                     sorted_indices_to_remove = cumulative_probs > self.top_p
+                    # Shift the indices to the right to keep also the first token above the threshold
                     sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
                     sorted_indices_to_remove[..., 0] = 0
+                    
                     indices_to_remove = sorted_indices[sorted_indices_to_remove]
                     next_token_logits[indices_to_remove] = float('-inf')
                 
-                # Sample next token
+                # Compute probabilities
+                # Filter out inf/-inf before softmax to avoid NaN
+                next_token_logits = torch.where(
+                    torch.isinf(next_token_logits),
+                    torch.full_like(next_token_logits, -1e4),
+                    next_token_logits
+                )
+                
+                # Apply softmax with max subtraction for numerical stability
+                next_token_logits = next_token_logits - next_token_logits.max()
                 probs = torch.softmax(next_token_logits, dim=-1)
-                next_token = torch.multinomial(probs, num_samples=1)
+                
+                # Ensure valid probability distribution
+                if torch.isnan(probs).any() or torch.isinf(probs).any() or (probs < 0).any():
+                    # Fallback to argmax if we get invalid probabilities
+                    next_token = torch.argmax(next_token_logits).unsqueeze(0)
+                else:
+                    # Sample from the probability distribution
+                    next_token = torch.multinomial(probs, num_samples=1)
                 
                 # Append to generated tokens
                 generated.append(next_token.item())
