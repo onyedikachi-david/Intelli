@@ -218,6 +218,9 @@ class DeepSeekWrapper:
             
             # Initial forward pass
             with torch.no_grad():
+                # Debug input shape
+                print(f"Input shape: {input_ids.shape}")
+                
                 outputs = self.model(input_ids)
                 
                 # Handle different output formats
@@ -228,17 +231,25 @@ class DeepSeekWrapper:
                 
                 # Print shape info for debugging
                 print(f"Model output shape: {logits.shape}")
+                print(f"Output dtype: {logits.dtype}")
+                
+                # Convert to float32 for better numerical stability
+                logits = logits.to(torch.float32)
                 
                 # Get last token logits based on shape
                 if len(logits.shape) == 3:
-                    next_token_logits = logits[0, -1, :].float()
+                    next_token_logits = logits[0, -1, :].clone()
                 elif len(logits.shape) == 2:
-                    next_token_logits = logits[-1, :].float()
+                    next_token_logits = logits[-1, :].clone()
                 else:
                     raise ValueError(f"Unexpected logits shape: {logits.shape}")
                 
+                # Check for inf/nan values
+                print(f"Has inf values: {torch.isinf(next_token_logits).any().item()}")
+                print(f"Has nan values: {torch.isnan(next_token_logits).any().item()}")
+                
                 # Print initial logits stats for debugging
-                print(f"Initial logits - min: {next_token_logits.min():.2f}, max: {next_token_logits.max():.2f}, mean: {next_token_logits.mean():.2f}")
+                print(f"Initial logits - min: {next_token_logits.min().item():.2f}, max: {next_token_logits.max().item():.2f}, mean: {next_token_logits.mean().item():.2f}")
                 
                 for i in range(self.max_length):
                     # Apply repetition penalty
@@ -257,8 +268,13 @@ class DeepSeekWrapper:
                     
                     # Apply top-k filtering
                     if self.top_k > 0:
-                        indices_to_remove = torch.topk(scaled_logits, min(self.top_k, scaled_logits.size(-1)))[0][-1]
-                        scaled_logits[scaled_logits < indices_to_remove] = float('-inf')
+                        values, _ = torch.topk(scaled_logits, min(self.top_k, scaled_logits.size(-1)))
+                        min_value = values[-1]
+                        scaled_logits = torch.where(
+                            scaled_logits < min_value,
+                            torch.full_like(scaled_logits, float('-inf')),
+                            scaled_logits
+                        )
                     
                     # Apply top-p (nucleus) filtering
                     if self.top_p < 1.0:
@@ -275,8 +291,7 @@ class DeepSeekWrapper:
                     
                     # Ensure finite values for softmax
                     max_logit = scaled_logits.max()
-                    if max_logit > 0:
-                        scaled_logits = scaled_logits - max_logit
+                    scaled_logits = scaled_logits - max_logit
                     
                     # Handle any remaining inf values
                     scaled_logits = torch.where(
@@ -287,12 +302,23 @@ class DeepSeekWrapper:
                     
                     # Apply softmax with better numerical stability
                     exp_logits = torch.exp(scaled_logits)
-                    probs = exp_logits / exp_logits.sum()
+                    probs = exp_logits / (exp_logits.sum() + 1e-10)  # Add small epsilon to prevent division by zero
+                    
+                    # Debug probability distribution
+                    if i == 0:
+                        print(f"Probability sum: {probs.sum().item():.6f}")
+                        print(f"Max probability: {probs.max().item():.6f}")
+                        print(f"Has valid distribution: {(probs >= 0).all().item() and (probs <= 1).all().item()}")
                     
                     # Ensure valid probabilities
                     if torch.isnan(probs).any() or (probs.sum() - 1.0).abs() > 1e-3:
-                        print("\nWarning: Invalid probabilities detected, falling back to argmax")
-                        next_token = torch.argmax(next_token_logits).unsqueeze(0)
+                        print("\nWarning: Invalid probabilities detected, falling back to greedy selection")
+                        # Use greedy selection instead of argmax
+                        next_token = torch.where(
+                            scaled_logits == scaled_logits.max(),
+                            torch.ones_like(scaled_logits),
+                            torch.zeros_like(scaled_logits)
+                        ).nonzero()[0].unsqueeze(0)
                     else:
                         # Sample from the filtered distribution
                         next_token = torch.multinomial(probs, num_samples=1)
@@ -310,12 +336,15 @@ class DeepSeekWrapper:
                         logits = outputs[0]
                     else:
                         logits = outputs
-                        
+                    
+                    # Convert to float32 for better numerical stability
+                    logits = logits.to(torch.float32)
+                    
                     # Get next token logits based on shape
                     if len(logits.shape) == 3:
-                        next_token_logits = logits[0, -1, :].float()
+                        next_token_logits = logits[0, -1, :].clone()
                     elif len(logits.shape) == 2:
-                        next_token_logits = logits[-1, :].float()
+                        next_token_logits = logits[-1, :].clone()
                     
                     # Decode the token and add to response
                     token_text = self.tokenizer.decode([next_token.item()], skip_special_tokens=True)
