@@ -305,28 +305,19 @@ class DeepSeekWrapper:
         # Generate tokens
         print(f"\nGeneration started (max_length={self.max_length})...")
         for i in range(self.max_length):
+            # Get model output for current tokens
             with torch.no_grad():
                 outputs = self.model(input_ids)
                 next_token_logits = outputs[0, -1, :].float()
-                print(f"\rProcessing token {i+1}/{self.max_length} | Last token ID: {next_token.item() if i > 0 else 'None'}", end="", flush=True)
                 
-                # Apply repetition penalty first
+                # Apply repetition penalty
                 if len(generated) > 0:
                     for token in generated:
                         next_token_logits[token] /= self.repetition_penalty
                 
                 # Apply temperature scaling
-                if self.temperature != 0:
+                if self.temperature > 0:
                     next_token_logits = next_token_logits / self.temperature
-                else:
-                    # If temperature is 0, we do greedy sampling
-                    next_token = torch.argmax(next_token_logits).unsqueeze(0)
-                    generated.append(next_token.item())
-                    input_ids = torch.cat([input_ids, next_token.unsqueeze(0)], dim=1)
-                    if next_token.item() == self.tokenizer.eos_token_id:
-                        print("\nEarly stopping: EOS token reached")
-                        break
-                    continue
                 
                 # Apply top-k filtering
                 if self.top_k > 0:
@@ -341,47 +332,49 @@ class DeepSeekWrapper:
                     
                     # Remove tokens with cumulative probability above the threshold
                     sorted_indices_to_remove = cumulative_probs > self.top_p
-                    # Shift the indices to the right to keep also the first token above the threshold
                     sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
                     sorted_indices_to_remove[..., 0] = 0
                     
                     indices_to_remove = sorted_indices[sorted_indices_to_remove]
                     next_token_logits[indices_to_remove] = float('-inf')
                 
-                # Compute probabilities
-                # Filter out inf/-inf before softmax to avoid NaN
-                next_token_logits = torch.where(
-                    torch.isinf(next_token_logits),
-                    torch.full_like(next_token_logits, -1e4),
-                    next_token_logits
-                )
+                # Handle numerical stability
+                max_val = next_token_logits.max()
+                if max_val > 0:
+                    next_token_logits = next_token_logits - max_val
                 
-                # Apply softmax with max subtraction for numerical stability
-                next_token_logits = next_token_logits - next_token_logits.max()
+                # Apply softmax
                 probs = torch.softmax(next_token_logits, dim=-1)
                 
-                # Ensure valid probability distribution
+                # Sample next token
                 if torch.isnan(probs).any() or torch.isinf(probs).any() or (probs < 0).any():
-                    # Fallback to argmax if we get invalid probabilities
+                    # Fallback to argmax if probabilities are invalid
                     next_token = torch.argmax(next_token_logits).unsqueeze(0)
                 else:
-                    # Sample from the probability distribution
+                    # Sample from the filtered distribution
                     next_token = torch.multinomial(probs, num_samples=1)
                 
-                # Append to generated tokens
+                # Add the chosen token to the sequence
                 generated.append(next_token.item())
                 input_ids = torch.cat([input_ids, next_token.unsqueeze(0)], dim=1)
                 
-                # Stop if end of text token is generated
+                # Print progress
+                print(f"\rProcessing token {i+1}/{self.max_length} | Last token: '{self.tokenizer.decode([next_token.item()])}'", end="", flush=True)
+                
+                # Stop if we hit the EOS token
                 if next_token.item() == self.tokenizer.eos_token_id:
+                    print("\nGeneration complete: EOS token reached")
                     break
+        
+        print("\n")  # New line after generation
         
         # Restore original parameters if they were temporarily overridden
         if kwargs:
             self.update_params(**temp_params)
         
-        # Decode and return generated text
-        return self.tokenizer.decode(input_ids[0].tolist())
+        # Decode and clean up the generated text
+        generated_text = self.tokenizer.decode(input_ids[0].tolist(), skip_special_tokens=True)
+        return generated_text.strip()
     
     def __call__(self, prompt: str, **kwargs) -> str:
         """Alias for generate method."""

@@ -179,8 +179,28 @@ class DeepSeekTokenizer:
             Decoded text
         """
         if skip_special_tokens:
-            ids = [id for id in ids if id not in {self.pad_token_id, self.bos_token_id, self.eos_token_id}]
-        return self.sp_model.decode(ids)
+            # Define special tokens to skip
+            special_tokens = {
+                self.pad_token_id,
+                self.bos_token_id,
+                self.eos_token_id,
+                self.sp_model.piece_to_id('<|user|>'),
+                self.sp_model.piece_to_id('<|assistant|>'),
+                self.sp_model.piece_to_id('<|endoftext|>')
+            }
+            # Filter out special tokens
+            ids = [id for id in ids if id not in special_tokens and id != -1]
+        
+        # Decode remaining tokens
+        text = self.sp_model.decode(ids)
+        
+        # Clean up any remaining special token text
+        if skip_special_tokens:
+            special_strings = ['<|endoftext|>', '<|user|>', '<|assistant|>']
+            for s in special_strings:
+                text = text.replace(s, '')
+        
+        return text.strip()
 
     def apply_chat_template(self, messages: List[Dict[str, str]], add_generation_prompt: bool = True) -> List[int]:
         """Apply chat template to format messages."""
