@@ -48,9 +48,19 @@ if [ -d "/usr/local/cuda/targets/x86_64-linux" ]; then
     export LD_LIBRARY_PATH="/usr/local/cuda/targets/x86_64-linux/lib:$LD_LIBRARY_PATH"
 fi
 
+# Check MIG configuration
+echo -e "\nChecking MIG Configuration:"
+nvidia-smi mig -lgi || echo "Failed to list GPU instances"
+nvidia-smi mig -lci || echo "Failed to list compute instances"
+
+# Set MIG-specific environment variables
+export CUDA_VISIBLE_DEVICES="MIG-GPU-0/0/0"  # Use first compute instance of first GPU instance
+export CUDA_MIG_DEVICE_SCOPE="single"
+export NVIDIA_MIG_CONFIG_DEVICES="all"
+export NVIDIA_DRIVER_CAPABILITIES="compute,utility,video"
+
 # Set additional CUDA environment variables
 export CUDA_DEVICE_ORDER="PCI_BUS_ID"
-export CUDA_VISIBLE_DEVICES=0  # Use first GPU
 export CUDA_LAUNCH_BLOCKING=1  # Synchronous CUDA for better error tracking
 export TORCH_CUDA_ARCH_LIST="8.0"  # Optimize for A100
 export TORCH_USE_CUDA_DSA=1  # Enable CUDA Dynamic Shared Memory
@@ -61,6 +71,7 @@ export PYTORCH_CUDA_ALLOC_CONF="max_split_size_mb:512"  # Memory allocation sett
 echo -e "\nCUDA Environment:"
 echo "CUDA_HOME: $CUDA_HOME"
 echo "CUDA_ROOT: $CUDA_ROOT"
+echo "CUDA_VISIBLE_DEVICES: $CUDA_VISIBLE_DEVICES"
 echo "PATH: $PATH"
 echo "LD_LIBRARY_PATH: $LD_LIBRARY_PATH"
 
@@ -86,22 +97,50 @@ done
 
 # Print PyTorch version and CUDA info
 echo -e "\nPyTorch and CUDA Information:"
-python -c "
+python3 -c '
 import torch
 import os
-print(f'PyTorch version: {torch.__version__}')
-print(f'CUDA available: {torch.cuda.is_available()}')
-print(f'CUDA version: {torch.version.cuda if torch.cuda.is_available() else "N/A"}')
-print(f'Using device: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else "CPU"}')
-print(f'\nEnvironment variables:')
-print(f'CUDA_HOME: {os.environ.get("CUDA_HOME", "Not set")}')
-print(f'LD_LIBRARY_PATH: {os.environ.get("LD_LIBRARY_PATH", "Not set")}')
-print(f'\nCUDA device count: {torch.cuda.device_count() if torch.cuda.is_available() else 0}')
-print(f'Current CUDA device: {torch.cuda.current_device() if torch.cuda.is_available() else "N/A"}')
-print(f'\nTorch CUDA build info:')
-print(f'CUDA arch list: {torch.cuda.get_arch_list() if hasattr(torch.cuda, "get_arch_list") else "N/A"}')
-print(f'CUDA device capability: {torch.cuda.get_device_capability() if torch.cuda.is_available() else "N/A"}')
-" || echo "Failed to get PyTorch info"
+import sys
+
+def print_cuda_info():
+    print(f"PyTorch version: {torch.__version__}")
+    print(f"CUDA available: {torch.cuda.is_available()}")
+    print(f"CUDA version: {torch.version.cuda if torch.cuda.is_available() else "N/A"}")
+    
+    if torch.cuda.is_available():
+        print(f"Using device: {torch.cuda.get_device_name(0)}")
+        print(f"\nCUDA device count: {torch.cuda.device_count()}")
+        print(f"Current CUDA device: {torch.cuda.current_device()}")
+        print(f"Device capability: {torch.cuda.get_device_capability()}")
+        print(f"\nCUDA device properties:")
+        props = torch.cuda.get_device_properties(0)
+        print(f"  Name: {props.name}")
+        print(f"  Total memory: {props.total_memory / 1024**3:.1f} GB")
+        print(f"  Multi processor count: {props.multi_processor_count}")
+        print(f"  Max threads per block: {props.max_threads_per_block}")
+        print(f"  Max threads per MP: {props.max_threads_per_multi_processor}")
+    else:
+        print("Using device: CPU")
+        
+    print(f"\nEnvironment variables:")
+    print(f"CUDA_HOME: {os.environ.get("CUDA_HOME", "Not set")}")
+    print(f"CUDA_VISIBLE_DEVICES: {os.environ.get("CUDA_VISIBLE_DEVICES", "Not set")}")
+    print(f"LD_LIBRARY_PATH: {os.environ.get("LD_LIBRARY_PATH", "Not set")}")
+    
+    if torch.cuda.is_available():
+        print(f"\nGPU Memory Info:")
+        print(f"Total: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
+        print(f"Allocated: {torch.cuda.memory_allocated() / 1024**3:.1f} GB")
+        print(f"Cached: {torch.cuda.memory_reserved() / 1024**3:.1f} GB")
+
+try:
+    print_cuda_info()
+except Exception as e:
+    print(f"Error getting CUDA info: {str(e)}")
+    import traceback
+    traceback.print_exc()
+    sys.exit(1)
+' || echo "Failed to get PyTorch info"
 
 # Run GPU test
 echo -e "\nRunning GPU inference test..."
