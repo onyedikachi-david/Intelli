@@ -295,56 +295,55 @@ class ModelLoader:
         actual_size = tensor.numel()
         
         # Get model configuration based on checkpoint dimensions
-        if "1.5b" in self.model_path.lower():
-            # For 1.5B model
-            hidden_dim = 2048
-            intermediate_dim = 5440
-            num_attention_heads = 16
-            head_dim = 24  # Fixed head dimension from checkpoint
-            num_key_value_heads = 8  # Number of KV heads for grouped attention
-            num_key_value_groups = num_attention_heads // num_key_value_heads
-            
-            # Calculate attention dimensions
-            query_head_dim = 128  # Query head dimension
-            kv_head_dim = 24  # Key/Value head dimension
-            
-            # Calculate MLP dimensions
-            mlp_intermediate_dim = 6720  # From checkpoint
-        else:
-            # For other variants, use dimensions from the checkpoint
-            if name == "model.embed_tokens.weight" or name == "lm_head.weight":
-                hidden_dim = original_shape[1]  # Get hidden dim from embedding
-            else:
-                # Try to determine hidden_dim from layernorm weights
-                for key in self.safetensors_header:
-                    if "input_layernorm.weight" in key:
-                        hidden_dim = self.safetensors_header[key]["shape"][0]
-                        break
-                else:
-                    hidden_dim = 1536  # Fallback default
-            
-            # Calculate attention dimensions from checkpoint
+        # First, find a layer's input layernorm to determine hidden_dim
+        hidden_dim = None
+        for key in self.safetensors_header:
+            if "input_layernorm.weight" in key:
+                hidden_dim = self.safetensors_header[key]["shape"][0]
+                break
+        if hidden_dim is None:
+            # Try to get from embeddings
             for key in self.safetensors_header:
-                if "self_attn.v_proj_a.0.weight" in key:
-                    num_key_value_heads = len([k for k in self.safetensors_header if "v_proj_a" in k and k.endswith(".weight")])
-                    head_dim = self.safetensors_header[key]["shape"][0]
+                if key.endswith("embed_tokens.weight"):
+                    hidden_dim = self.safetensors_header[key]["shape"][1]
                     break
-            else:
-                num_key_value_heads = 32
-                head_dim = 24
-            
-            num_attention_heads = num_key_value_heads * 2  # Common ratio in transformer models
-            num_key_value_groups = num_attention_heads // num_key_value_heads
-            query_head_dim = head_dim
-            kv_head_dim = head_dim
-            
-            # Calculate MLP dimensions from checkpoint
+        if hidden_dim is None:
+            hidden_dim = original_shape[1] if len(original_shape) > 1 else original_shape[0]
+        
+        # Find MLP dimensions from gate_proj or up_proj
+        intermediate_dim = None
+        for key in self.safetensors_header:
+            if "mlp.gate_proj.weight" in key:
+                intermediate_dim = self.safetensors_header[key]["shape"][0]
+                break
+            elif "mlp.up_proj.weight" in key:
+                intermediate_dim = self.safetensors_header[key]["shape"][0]
+                break
+        if intermediate_dim is None:
+            intermediate_dim = hidden_dim * 4  # Common ratio in transformer models
+        
+        # Calculate attention dimensions from checkpoint
+        head_dim = None
+        num_key_value_heads = None
+        for key in self.safetensors_header:
+            if "self_attn.v_proj_a.0.weight" in key:
+                head_dim = self.safetensors_header[key]["shape"][0]
+                # Count number of v_proj_a shards to determine KV heads
+                num_key_value_heads = len([k for k in self.safetensors_header if "v_proj_a" in k and k.endswith(".weight")])
+                break
+        if head_dim is None or num_key_value_heads is None:
+            # Try to determine from o_proj dimensions
             for key in self.safetensors_header:
-                if "mlp.up_proj.weight" in key:
-                    mlp_intermediate_dim = self.safetensors_header[key]["shape"][0]
+                if "self_attn.o_proj.weight" in key:
+                    o_proj_shape = self.safetensors_header[key]["shape"]
+                    head_dim = o_proj_shape[0] // 48  # Common ratio
+                    num_key_value_heads = o_proj_shape[0] // head_dim
                     break
-                else:
-                    mlp_intermediate_dim = hidden_dim * 4  # Common ratio in transformer models
+        if head_dim is None:
+            head_dim = 32  # Fallback
+            num_key_value_heads = hidden_dim // head_dim
+        
+        num_attention_heads = num_key_value_heads
         
         # Map tensor names to remove "model." prefix if present
         clean_name = name.replace("model.", "")
@@ -354,70 +353,29 @@ class ModelLoader:
             if "proj_a" in clean_name:
                 # Handle sharded key/value projection weights
                 if any(x in clean_name for x in ["k_proj_a", "v_proj_a"]):
-                    shard_idx = int(clean_name.split(".")[-2])  # Get shard index
-                    if shard_idx < num_key_value_heads:
-                        if clean_name.endswith(".weight"):
-                            shape = (kv_head_dim, hidden_dim)  # Use KV head dimension
-                        elif clean_name.endswith(".bias"):
-                            shape = (kv_head_dim,)  # Use KV head dimension
+                    # Keep original shape for these layers
+                    shape = original_shape
                 else:
-                    # Query projection
-                    if clean_name.endswith(".weight"):
-                        shape = (query_head_dim * num_attention_heads, hidden_dim)
-                    elif clean_name.endswith(".bias"):
-                        shape = (query_head_dim * num_attention_heads,)
+                    # Query projection - keep original shape
+                    shape = original_shape
             elif "proj_b" in clean_name:
-                # Handle key/value projection second matrix
-                if clean_name.endswith(".weight"):
-                    shape = (hidden_dim, kv_head_dim)  # Use KV head dimension
+                # Handle key/value projection second matrix - keep original shape
+                shape = original_shape
             elif "o_proj" in clean_name:
-                # Output projection
-                if clean_name.endswith(".weight"):
-                    shape = (hidden_dim, hidden_dim)
-                elif clean_name.endswith(".bias"):
-                    shape = (hidden_dim,)
+                # Output projection - keep original shape
+                shape = original_shape
         # Handle embedding and lm_head
         elif clean_name in ["embed_tokens.weight", "lm_head.weight"]:
-            vocab_size = original_shape[0]  # Use vocab size from checkpoint
-            shape = original_shape  # Keep original shape for these layers
+            # Keep original shapes for these layers
+            shape = original_shape
         # Handle MLP layers
         elif "mlp." in clean_name:
-            if clean_name.endswith(".weight"):
-                if "gate_proj" in clean_name or "up_proj" in clean_name:
-                    shape = (mlp_intermediate_dim, hidden_dim)
-                elif "down_proj" in clean_name:
-                    shape = (hidden_dim, mlp_intermediate_dim)
-            elif clean_name.endswith(".bias"):
-                if "gate_proj" in clean_name or "up_proj" in clean_name:
-                    shape = (mlp_intermediate_dim,)
-                elif "down_proj" in clean_name:
-                    shape = (hidden_dim,)
+            # Keep original shapes for MLP layers
+            shape = original_shape
         # Handle norm layers
         elif any(x in clean_name for x in ["norm.weight", "input_layernorm.weight", "post_attention_layernorm.weight"]):
-            shape = original_shape  # Keep original shape for norm layers
-        
-        # Verify tensor size matches target shape
-        target_size = np.prod(shape)
-        if actual_size != target_size:
-            print(f"Warning: Size mismatch for tensor {name}")
-            print(f"Actual size: {actual_size}, Target shape: {shape} (size {target_size})")
-            print(f"Original shape: {original_shape}")
-            
-            # For attention layers, try to adjust dimensions
-            if "self_attn" in clean_name:
-                if "proj_a" in clean_name and clean_name.endswith(".weight"):
-                    # Keep original head dimension from checkpoint
-                    shape = original_shape
-                elif "proj_b" in clean_name and clean_name.endswith(".weight"):
-                    # Keep original head dimension from checkpoint
-                    shape = original_shape
-            # For MLP layers, keep original dimensions
-            elif "mlp." in clean_name:
-                shape = original_shape
-            # For other tensors, keep original dimensions
-            else:
-                print(f"Using original shape for {name}")
-                shape = original_shape
+            # Keep original shapes for norm layers
+            shape = original_shape
         
         # Reshape and move to device
         try:
