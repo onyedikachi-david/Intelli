@@ -68,15 +68,24 @@ class RotaryEmbedding(nn.Module):
         if args.max_seq_len > args.original_seq_len:
             scale = math.log(args.rope_factor) / 2.0
             self.inv_freq = self.inv_freq * args.rope_factor ** (scale / dim)
+        
+        # Store dimensions for use in forward pass
+        self.dim = dim
 
     def forward(self, x: torch.Tensor, start_pos: int) -> torch.Tensor:
         # Move inv_freq to correct device
         self.inv_freq = self.inv_freq.to(x.device)
         
+        # Only apply rotary embeddings to first self.dim dimensions
+        x_rot = x[..., :self.dim*2]
+        x_pass = x[..., self.dim*2:]
+        
         t = torch.arange(start_pos, start_pos + x.size(1), device=x.device)
         freqs = torch.einsum("i,j->ij", t, self.inv_freq)
         emb = torch.cat((freqs, freqs), dim=-1)
-        return x * emb.cos() + torch.roll(x, shifts=1, dims=-1) * emb.sin()
+        
+        x_rot = x_rot * emb.cos() + torch.roll(x_rot, shifts=1, dims=-1) * emb.sin()
+        return torch.cat((x_rot, x_pass), dim=-1)
 
 
 class Attention(nn.Module):
@@ -110,9 +119,8 @@ class Attention(nn.Module):
         k = self.k_proj(x).view(B, T, 1, 256).expand(B, T, H, 256)  # [B, T, H, 256]
         v = self.v_proj(x).view(B, T, 1, 256).expand(B, T, H, 256)  # [B, T, H, 256]
         
-        # Apply rotary embeddings
+        # Apply rotary embeddings only to the query projection
         q = self.rope(q, start_pos)
-        k = self.rope(k, start_pos)
         
         # Compute attention
         attn = torch.einsum("bthd,bshd->bhts", q, k) * self.scale
