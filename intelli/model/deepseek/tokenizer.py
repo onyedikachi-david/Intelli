@@ -1,6 +1,6 @@
 import os
 import json
-from typing import List, Optional
+from typing import List, Optional, Dict
 import sentencepiece as spm
 
 
@@ -49,6 +49,9 @@ class DeepSeekTokenizer:
         self.pad_token_id = self.config.get('pad_token_id', 0)
         self.eos_token_id = self.config.get('eos_token_id', 2)
         self.bos_token_id = self.config.get('bos_token_id', 1)
+        
+        # Set chat template
+        self.chat_template = self.config.get('chat_template', "{%- for message in messages -%}\n{% if message['role'] == 'user' %}\n{{ '<|user|>\n' + message['content'] + '\n<|assistant|>\n' }}\n{% elif message['role'] == 'assistant' %}\n{{ message['content'] + '\n' }}\n{% endif %}\n{%- endfor -%}")
     
     def _write_spm_model(self, output_path: str):
         """Write a SentencePiece model file from JSON vocab."""
