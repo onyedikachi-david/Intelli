@@ -199,6 +199,46 @@ def weight_dequant_cpu(x, scale):
 def fp8_gemm_cpu(a, b):
     return torch.matmul(a, b)
 
+# Main interface functions that choose between CPU and GPU implementations
+def act_quant(x, scale):
+    if USE_TRITON and x.is_cuda:
+        n_elements = x.numel()
+        BLOCK_SIZE = 1024
+        grid = (math.ceil(n_elements / BLOCK_SIZE),)
+        act_quant_kernel[grid](x, scale, n_elements, BLOCK_SIZE)
+        return x
+    else:
+        return act_quant_cpu(x, scale)
+
+def weight_dequant(x, scale):
+    if USE_TRITON and x.is_cuda:
+        n_elements = x.numel()
+        BLOCK_SIZE = 1024
+        grid = (math.ceil(n_elements / BLOCK_SIZE),)
+        weight_dequant_kernel[grid](x, scale, n_elements, BLOCK_SIZE)
+        return x
+    else:
+        return weight_dequant_cpu(x, scale)
+
+def fp8_gemm(a, b):
+    if USE_TRITON and a.is_cuda and b.is_cuda:
+        M, K = a.shape
+        K, N = b.shape
+        c = torch.empty((M, N), device=a.device, dtype=torch.float16)
+        grid = lambda META: (
+            triton.cdiv(M, META['BLOCK_SIZE_M']) * triton.cdiv(N, META['BLOCK_SIZE_N']),
+        )
+        fp8_gemm_kernel[grid](
+            a, b, c,
+            M, N, K,
+            a.stride(0), a.stride(1),
+            b.stride(0), b.stride(1),
+            c.stride(0), c.stride(1),
+        )
+        return c
+    else:
+        return fp8_gemm_cpu(a, b)
+
 # Only define Triton kernels if CUDA is available
 if USE_TRITON:
     @triton.jit
@@ -270,44 +310,4 @@ if USE_TRITON:
         offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
         c_ptrs = c_ptr + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :]
         c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
-        tl.store(c_ptrs, c, mask=c_mask)
-
-# Main interface functions that choose between CPU and GPU implementations
-def act_quant(x, scale):
-    if USE_TRITON and x.is_cuda:
-        n_elements = x.numel()
-        BLOCK_SIZE = 1024
-        grid = (math.ceil(n_elements / BLOCK_SIZE),)
-        act_quant_kernel[grid](x, scale, n_elements, BLOCK_SIZE)
-        return x
-    else:
-        return act_quant_cpu(x, scale)
-
-def weight_dequant(x, scale):
-    if USE_TRITON and x.is_cuda:
-        n_elements = x.numel()
-        BLOCK_SIZE = 1024
-        grid = (math.ceil(n_elements / BLOCK_SIZE),)
-        weight_dequant_kernel[grid](x, scale, n_elements, BLOCK_SIZE)
-        return x
-    else:
-        return weight_dequant_cpu(x, scale)
-
-def fp8_gemm(a, b):
-    if USE_TRITON and a.is_cuda and b.is_cuda:
-        M, K = a.shape
-        K, N = b.shape
-        c = torch.empty((M, N), device=a.device, dtype=torch.float16)
-        grid = lambda META: (
-            triton.cdiv(M, META['BLOCK_SIZE_M']) * triton.cdiv(N, META['BLOCK_SIZE_N']),
-        )
-        fp8_gemm_kernel[grid](
-            a, b, c,
-            M, N, K,
-            a.stride(0), a.stride(1),
-            b.stride(0), b.stride(1),
-            c.stride(0), c.stride(1),
-        )
-        return c
-    else:
-        return fp8_gemm_cpu(a, b) 
+        tl.store(c_ptrs, c, mask=c_mask) 
