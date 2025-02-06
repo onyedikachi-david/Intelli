@@ -72,6 +72,12 @@ class RotaryEmbedding(nn.Module):
         # Store dimensions for use in forward pass
         self.dim = dim
 
+    def _rotate_half(self, x: torch.Tensor) -> torch.Tensor:
+        """Rotate half the hidden dims of the input."""
+        x1 = x[..., :x.shape[-1] // 2]
+        x2 = x[..., x.shape[-1] // 2:]
+        return torch.cat((-x2, x1), dim=-1)
+
     def forward(self, x: torch.Tensor, start_pos: int) -> torch.Tensor:
         # Move inv_freq to correct device
         self.inv_freq = self.inv_freq.to(x.device)
@@ -81,25 +87,16 @@ class RotaryEmbedding(nn.Module):
         t = torch.arange(start_pos, start_pos + seq_len, device=x.device)
         freqs = torch.einsum("i,j->ij", t, self.inv_freq)  # [seq_len, dim/2]
         
-        # Compute cos and sin for half the dimension
-        cos = freqs.cos()  # [seq_len, dim/2]
-        sin = freqs.sin()  # [seq_len, dim/2]
+        # Compute cos and sin
+        cos = torch.cos(freqs).view(1, seq_len, 1, freqs.shape[-1])  # [1, seq_len, 1, dim/2]
+        sin = torch.sin(freqs).view(1, seq_len, 1, freqs.shape[-1])  # [1, seq_len, 1, dim/2]
         
-        # Reshape for broadcasting
-        cos = cos.view(1, seq_len, 1, -1)  # [1, seq_len, 1, dim/2]
-        sin = sin.view(1, seq_len, 1, -1)  # [1, seq_len, 1, dim/2]
+        # Duplicate cos and sin to match input dimensions
+        cos = torch.cat([cos, cos], dim=-1)  # [1, seq_len, 1, dim]
+        sin = torch.cat([sin, sin], dim=-1)  # [1, seq_len, 1, dim]
         
-        # Split input into even and odd dimensions
-        x_even = x[..., ::2]  # [B, T, H, dim/2]
-        x_odd = x[..., 1::2]  # [B, T, H, dim/2]
-        
-        # Apply rotation
-        x_rotated = torch.cat([
-            x_even * cos - x_odd * sin,  # Real part
-            x_odd * cos + x_even * sin,  # Imaginary part
-        ], dim=-1)
-        
-        return x_rotated
+        # Apply rotary embeddings
+        return x * cos + self._rotate_half(x) * sin
 
 
 class Attention(nn.Module):
