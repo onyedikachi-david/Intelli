@@ -76,29 +76,28 @@ class RotaryEmbedding(nn.Module):
         # Move inv_freq to correct device
         self.inv_freq = self.inv_freq.to(x.device)
         
-        # Only apply rotary embeddings to first self.dim dimensions
-        x_rot = x[..., :self.dim]
-        x_pass = x[..., self.dim:]
+        # Get sequence length and compute position embeddings
+        seq_len = x.shape[1]
+        t = torch.arange(start_pos, start_pos + seq_len, device=x.device)
+        freqs = torch.einsum("i,j->ij", t, self.inv_freq)  # [seq_len, dim/2]
         
-        t = torch.arange(start_pos, start_pos + x.size(1), device=x.device)
-        freqs = torch.einsum("i,j->ij", t, self.inv_freq)  # [T, dim/2]
+        # Compute cos and sin
+        cos = torch.cat([freqs.cos(), freqs.cos()], dim=-1)  # [seq_len, dim]
+        sin = torch.cat([freqs.sin(), freqs.sin()], dim=-1)  # [seq_len, dim]
         
-        # Create cos/sin embeddings
-        freqs = torch.cat((freqs, freqs), dim=-1)  # [T, dim]
-        cos = freqs.cos().unsqueeze(0).unsqueeze(2)  # [1, T, 1, dim]
-        sin = freqs.sin().unsqueeze(0).unsqueeze(2)  # [1, T, 1, dim]
+        # Reshape for broadcasting
+        cos = cos.view(1, seq_len, 1, -1)  # [1, seq_len, 1, dim]
+        sin = sin.view(1, seq_len, 1, -1)  # [1, seq_len, 1, dim]
         
-        # Reshape x_rot for rotation
-        x_rot_a, x_rot_b = x_rot.chunk(2, dim=-1)  # Split along last dim
-        
-        # Apply rotation
-        rotated = torch.cat([
-            x_rot_a * cos - x_rot_b * sin,
-            x_rot_b * cos + x_rot_a * sin,
+        # Compute rotary embeddings
+        x_rope = torch.cat([
+            x[..., ::2],  # Even indices
+            x[..., 1::2]  # Odd indices
         ], dim=-1)
         
-        # Concatenate with pass-through values
-        return torch.cat((rotated, x_pass), dim=-1) if x_pass.size(-1) > 0 else rotated
+        x_rotated = x_rope * cos + torch.roll(x_rope, shifts=x_rope.shape[-1]//2, dims=-1) * sin
+        
+        return x_rotated
 
 
 class Attention(nn.Module):
@@ -136,7 +135,8 @@ class Attention(nn.Module):
         v = self.v_proj(x).view(B, T, 1, 256).expand(B, T, H, 256)  # [B, T, H, 256]
         
         # Apply rotary embeddings only to the query projection
-        q = self.rope(q[..., :self.rope_dim*2], start_pos)  # Apply RoPE to first rope_dim*2 dims
+        q_rope = self.rope(q[..., :self.rope_dim*2], start_pos)  # Apply RoPE to first rope_dim*2 dims
+        q = torch.cat([q_rope, q[..., self.rope_dim*2:]], dim=-1) if q.shape[-1] > self.rope_dim*2 else q_rope
         
         # Compute attention
         attn = torch.einsum("bthd,bshd->bhts", q, k) * self.scale
