@@ -155,36 +155,116 @@ class Attention(nn.Module):
         k_proj_bias = state_dict.pop(prefix + 'k_proj.bias', None)
         
         if k_proj_weight is not None:
-            # Convert k_proj weights to LoRA format
-            rank = self.k_proj_a.out_features
-            U, S, Vh = torch.linalg.svd(k_proj_weight, full_matrices=False)
-            # Take top-k components
-            U = U[:, :rank] * torch.sqrt(S[:rank])
-            Vh = torch.sqrt(S[:rank]).unsqueeze(1) * Vh[:rank, :]
-            # Assign to a and b projections
-            state_dict[prefix + 'k_proj_a.weight'] = U.t()
-            state_dict[prefix + 'k_proj_b.weight'] = Vh
-            if k_proj_bias is not None:
-                state_dict[prefix + 'k_proj_b.bias'] = k_proj_bias
-                state_dict[prefix + 'k_proj_a.bias'] = torch.zeros_like(k_proj_bias[:rank])
+            try:
+                # Check for non-finite values
+                if not torch.isfinite(k_proj_weight).all():
+                    # Replace non-finite values with 0
+                    k_proj_weight = torch.nan_to_num(k_proj_weight, nan=0.0, posinf=0.0, neginf=0.0)
+                
+                # Add small noise for numerical stability
+                noise_scale = 1e-6
+                k_proj_weight = k_proj_weight + torch.randn_like(k_proj_weight) * noise_scale
+                
+                # Convert k_proj weights to LoRA format
+                rank = self.k_proj_a.out_features
+                try:
+                    # Try SVD with the stabilized matrix
+                    U, S, Vh = torch.linalg.svd(k_proj_weight, full_matrices=False)
+                except torch._C._LinAlgError:
+                    # Fallback: Add diagonal regularization
+                    reg_scale = 1e-4
+                    regularized_weight = k_proj_weight + torch.eye(
+                        k_proj_weight.size(-1),
+                        device=k_proj_weight.device,
+                        dtype=k_proj_weight.dtype
+                    ) * reg_scale
+                    U, S, Vh = torch.linalg.svd(regularized_weight, full_matrices=False)
+                
+                # Take top-k components with numerical stability
+                eps = 1e-6
+                S = torch.clamp(S, min=eps)  # Ensure no zero singular values
+                U = U[:, :rank] * torch.sqrt(S[:rank]).unsqueeze(0)
+                Vh = torch.sqrt(S[:rank]).unsqueeze(1) * Vh[:rank, :]
+                
+                # Assign to a and b projections
+                state_dict[prefix + 'k_proj_a.weight'] = U.t()
+                state_dict[prefix + 'k_proj_b.weight'] = Vh
+                if k_proj_bias is not None:
+                    state_dict[prefix + 'k_proj_b.bias'] = k_proj_bias
+                    state_dict[prefix + 'k_proj_a.bias'] = torch.zeros_like(k_proj_bias[:rank])
+            except Exception as e:
+                error_msgs.append(f'Error converting k_proj weights: {str(e)}')
+                # Fallback: Initialize with random weights
+                state_dict[prefix + 'k_proj_a.weight'] = torch.randn(
+                    self.k_proj_a.out_features,
+                    k_proj_weight.size(1),
+                    device=k_proj_weight.device,
+                    dtype=k_proj_weight.dtype
+                ) * 0.02
+                state_dict[prefix + 'k_proj_b.weight'] = torch.randn(
+                    rank,
+                    k_proj_weight.size(0),
+                    device=k_proj_weight.device,
+                    dtype=k_proj_weight.dtype
+                ) * 0.02
         
         # Handle value projection weights
         v_proj_weight = state_dict.pop(prefix + 'v_proj.weight', None)
         v_proj_bias = state_dict.pop(prefix + 'v_proj.bias', None)
         
         if v_proj_weight is not None:
-            # Convert v_proj weights to LoRA format
-            rank = self.v_proj_a.out_features
-            U, S, Vh = torch.linalg.svd(v_proj_weight, full_matrices=False)
-            # Take top-k components
-            U = U[:, :rank] * torch.sqrt(S[:rank])
-            Vh = torch.sqrt(S[:rank]).unsqueeze(1) * Vh[:rank, :]
-            # Assign to a and b projections
-            state_dict[prefix + 'v_proj_a.weight'] = U.t()
-            state_dict[prefix + 'v_proj_b.weight'] = Vh
-            if v_proj_bias is not None:
-                state_dict[prefix + 'v_proj_b.bias'] = v_proj_bias
-                state_dict[prefix + 'v_proj_a.bias'] = torch.zeros_like(v_proj_bias[:rank])
+            try:
+                # Check for non-finite values
+                if not torch.isfinite(v_proj_weight).all():
+                    # Replace non-finite values with 0
+                    v_proj_weight = torch.nan_to_num(v_proj_weight, nan=0.0, posinf=0.0, neginf=0.0)
+                
+                # Add small noise for numerical stability
+                noise_scale = 1e-6
+                v_proj_weight = v_proj_weight + torch.randn_like(v_proj_weight) * noise_scale
+                
+                # Convert v_proj weights to LoRA format
+                rank = self.v_proj_a.out_features
+                try:
+                    # Try SVD with the stabilized matrix
+                    U, S, Vh = torch.linalg.svd(v_proj_weight, full_matrices=False)
+                except torch._C._LinAlgError:
+                    # Fallback: Add diagonal regularization
+                    reg_scale = 1e-4
+                    regularized_weight = v_proj_weight + torch.eye(
+                        v_proj_weight.size(-1),
+                        device=v_proj_weight.device,
+                        dtype=v_proj_weight.dtype
+                    ) * reg_scale
+                    U, S, Vh = torch.linalg.svd(regularized_weight, full_matrices=False)
+                
+                # Take top-k components with numerical stability
+                eps = 1e-6
+                S = torch.clamp(S, min=eps)  # Ensure no zero singular values
+                U = U[:, :rank] * torch.sqrt(S[:rank]).unsqueeze(0)
+                Vh = torch.sqrt(S[:rank]).unsqueeze(1) * Vh[:rank, :]
+                
+                # Assign to a and b projections
+                state_dict[prefix + 'v_proj_a.weight'] = U.t()
+                state_dict[prefix + 'v_proj_b.weight'] = Vh
+                if v_proj_bias is not None:
+                    state_dict[prefix + 'v_proj_b.bias'] = v_proj_bias
+                    state_dict[prefix + 'v_proj_a.bias'] = torch.zeros_like(v_proj_bias[:rank])
+            except Exception as e:
+                error_msgs.append(f'Error converting v_proj weights: {str(e)}')
+                # Fallback: Initialize with random weights
+                state_dict[prefix + 'v_proj_a.weight'] = torch.randn(
+                    self.v_proj_a.out_features,
+                    v_proj_weight.size(1),
+                    device=v_proj_weight.device,
+                    dtype=v_proj_weight.dtype
+                ) * 0.02
+                state_dict[prefix + 'v_proj_b.weight'] = torch.randn(
+                    rank,
+                    v_proj_weight.size(0),
+                    device=v_proj_weight.device,
+                    dtype=v_proj_weight.dtype
+                ) * 0.02
         
         # Initialize norm layers if not present
         if prefix + 'k_norm.weight' not in state_dict:
