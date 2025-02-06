@@ -93,7 +93,7 @@ class DeepSeekWrapper:
             'dim': self.config["hidden_size"],
             'n_layers': self.config["num_hidden_layers"],
             'n_heads': self.config["num_attention_heads"],
-            'vocab_size': self.tokenizer.sp_model.get_piece_size(),  # Use tokenizer vocab size
+            'vocab_size': self.config["vocab_size"],
             'max_seq_len': self.config["max_sequence_length"],
             'max_batch_size': 32,
             'inter_dim': self.config["intermediate_size"],
@@ -162,11 +162,8 @@ class DeepSeekWrapper:
                     state_dict[bias_key] = bias[i].contiguous()
             # Handle embedding and output layers
             elif key in ['embed_tokens.weight', 'lm_head.weight']:
-                # Resize embedding/output layers to match tokenizer vocab size
-                vocab_size = self.tokenizer.sp_model.get_piece_size()
-                if tensor.size(0) > vocab_size:
-                    tensor = tensor[:vocab_size]
-                state_dict[key] = tensor
+                # Keep original vocab size for embeddings
+                state_dict[key] = tensor.to(self.dtype)
             else:
                 state_dict[key] = tensor
         
@@ -310,45 +307,37 @@ class DeepSeekWrapper:
                 print(f"Raw logits - min: {next_token_logits.min().item():.2f}, max: {next_token_logits.max().item():.2f}, mean: {next_token_logits.mean().item():.2f}")
                 
                 # Create mapping between model and tokenizer vocabularies
-                model_vocab_size = self.model.args.vocab_size
+                model_vocab_size = self.config["vocab_size"]
                 tokenizer_vocab_size = self.tokenizer.sp_model.get_piece_size()
                 
-                # Create vocabulary mapping tensor
-                vocab_map = torch.arange(model_vocab_size, device=self.device)
-                vocab_map[tokenizer_vocab_size:] = self.tokenizer.sp_model.unk_id()
-                
-                # Map logits to tokenizer vocabulary
-                mapped_logits = next_token_logits.index_select(0, vocab_map)
+                # Only keep logits for valid tokenizer tokens
+                next_token_logits = next_token_logits[:tokenizer_vocab_size]
                 
                 # Replace NaN/Inf values
-                mapped_logits = torch.where(
-                    torch.isnan(mapped_logits) | torch.isinf(mapped_logits),
-                    torch.full_like(mapped_logits, -1e4),
-                    mapped_logits
+                next_token_logits = torch.where(
+                    torch.isnan(next_token_logits) | torch.isinf(next_token_logits),
+                    torch.full_like(next_token_logits, -1e4),
+                    next_token_logits
                 )
                 
-                # Check for inf/nan values after replacement
-                print(f"Has inf values after fix: {torch.isinf(mapped_logits).any().item()}")
-                print(f"Has nan values after fix: {torch.isnan(mapped_logits).any().item()}")
-                
-                # Print mapped logits stats
-                print(f"Mapped logits - min: {mapped_logits.min().item():.2f}, max: {mapped_logits.max().item():.2f}, mean: {mapped_logits.mean().item():.2f}")
+                # Print logits stats for debugging
+                print(f"Raw logits - min: {next_token_logits.min().item():.2f}, max: {next_token_logits.max().item():.2f}, mean: {next_token_logits.mean().item():.2f}")
                 
                 for i in range(self.max_length):
                     # Apply repetition penalty
                     if len(generated) > 0:
                         for token in generated:
                             if token < tokenizer_vocab_size:
-                                if mapped_logits[token] > 0:
-                                    mapped_logits[token] /= self.repetition_penalty
+                                if next_token_logits[token] > 0:
+                                    next_token_logits[token] /= self.repetition_penalty
                                 else:
-                                    mapped_logits[token] *= self.repetition_penalty
+                                    next_token_logits[token] *= self.repetition_penalty
                     
                     # Apply temperature scaling
                     if self.temperature > 0:
-                        scaled_logits = mapped_logits / max(self.temperature, 1e-6)
+                        scaled_logits = next_token_logits / max(self.temperature, 1e-6)
                     else:
-                        scaled_logits = mapped_logits
+                        scaled_logits = next_token_logits
                     
                     # Apply top-k filtering
                     if self.top_k > 0:
@@ -437,15 +426,22 @@ class DeepSeekWrapper:
                     elif len(logits.shape) == 2:
                         next_token_logits = logits[-1].clone()
                     
-                    # Map logits to tokenizer vocabulary
-                    mapped_logits = next_token_logits.index_select(0, vocab_map)
+                    # Create mapping between model and tokenizer vocabularies
+                    model_vocab_size = self.config["vocab_size"]
+                    tokenizer_vocab_size = self.tokenizer.sp_model.get_piece_size()
+                    
+                    # Only keep logits for valid tokenizer tokens
+                    next_token_logits = next_token_logits[:tokenizer_vocab_size]
                     
                     # Replace NaN/Inf values
-                    mapped_logits = torch.where(
-                        torch.isnan(mapped_logits) | torch.isinf(mapped_logits),
-                        torch.full_like(mapped_logits, -1e4),
-                        mapped_logits
+                    next_token_logits = torch.where(
+                        torch.isnan(next_token_logits) | torch.isinf(next_token_logits),
+                        torch.full_like(next_token_logits, -1e4),
+                        next_token_logits
                     )
+                    
+                    # Print logits stats for debugging
+                    print(f"Raw logits - min: {next_token_logits.min().item():.2f}, max: {next_token_logits.max().item():.2f}, mean: {next_token_logits.mean().item():.2f}")
                     
                     # Check for stop conditions
                     if token_id in [self.tokenizer.eos_token_id, self.tokenizer.user_token_id]:
