@@ -149,16 +149,27 @@ class Attention(nn.Module):
         k_proj_bias = state_dict.pop(prefix + 'k_proj.bias', None)
         
         if k_proj_weight is not None:
-            # Calculate model parallel size based on weight dimensions
-            total_elements = k_proj_weight.numel()
-            mp_size = total_elements // (self.lora_rank * self.hidden_size)
+            # Fixed model parallel size - DeepSeek uses 8-way MP
+            mp_size = 8
+            
+            # Verify dimensions match expected sizes
+            expected_elements = mp_size * self.lora_rank * self.hidden_size // mp_size
+            actual_elements = k_proj_weight.numel()
+            if actual_elements != expected_elements:
+                error_msgs.append(
+                    f'Size mismatch for {prefix}k_proj.weight: expected {expected_elements} elements, got {actual_elements}'
+                )
+                return
             
             # Reshape according to DeepSeek's MP pattern
             k_proj_weight = k_proj_weight.view(
-                mp_size,                # model parallel splits
-                self.lora_rank // mp_size,  # 256/8=32 for each shard
+                self.lora_rank,         # full LoRA rank (256)
                 self.hidden_size        # hidden_size (1536)
             )
+            
+            # Split into MP shards
+            shard_size = self.lora_rank // mp_size  # 32 per shard
+            k_proj_weight = k_proj_weight.view(mp_size, shard_size, self.hidden_size)
             
             # Convert to LoRA format with proper sharding
             for i in range(mp_size):
@@ -167,13 +178,13 @@ class Attention(nn.Module):
                 
                 if k_proj_bias is not None:
                     # Split bias into shards of size [32]
-                    bias_shard = k_proj_bias[i * (self.lora_rank // mp_size):(i + 1) * (self.lora_rank // mp_size)]
+                    bias_shard = k_proj_bias[i * shard_size:(i + 1) * shard_size]
                     state_dict[f"{prefix}k_proj_a.bias.{i}"] = bias_shard
             
             # proj_b weights are shared and transposed [1536, 32]
             state_dict[f"{prefix}k_proj_b.weight"] = torch.eye(
                 self.hidden_size, 
-                self.lora_rank // mp_size,
+                shard_size,
                 device=k_proj_weight.device,
                 dtype=k_proj_weight.dtype
             )
@@ -183,16 +194,27 @@ class Attention(nn.Module):
         v_proj_bias = state_dict.pop(prefix + 'v_proj.bias', None)
         
         if v_proj_weight is not None:
-            # Calculate model parallel size based on weight dimensions
-            total_elements = v_proj_weight.numel()
-            mp_size = total_elements // (self.lora_rank * self.hidden_size)
+            # Fixed model parallel size - DeepSeek uses 8-way MP
+            mp_size = 8
+            
+            # Verify dimensions match expected sizes
+            expected_elements = mp_size * self.lora_rank * self.hidden_size // mp_size
+            actual_elements = v_proj_weight.numel()
+            if actual_elements != expected_elements:
+                error_msgs.append(
+                    f'Size mismatch for {prefix}v_proj.weight: expected {expected_elements} elements, got {actual_elements}'
+                )
+                return
             
             # Reshape according to DeepSeek's MP pattern
             v_proj_weight = v_proj_weight.view(
-                mp_size,                # model parallel splits
-                self.lora_rank // mp_size,  # 256/8=32 for each shard
+                self.lora_rank,         # full LoRA rank (256)
                 self.hidden_size        # hidden_size (1536)
             )
+            
+            # Split into MP shards
+            shard_size = self.lora_rank // mp_size  # 32 per shard
+            v_proj_weight = v_proj_weight.view(mp_size, shard_size, self.hidden_size)
             
             # Convert to LoRA format with proper sharding
             for i in range(mp_size):
@@ -201,13 +223,13 @@ class Attention(nn.Module):
                 
                 if v_proj_bias is not None:
                     # Split bias into shards of size [32]
-                    bias_shard = v_proj_bias[i * (self.lora_rank // mp_size):(i + 1) * (self.lora_rank // mp_size)]
+                    bias_shard = v_proj_bias[i * shard_size:(i + 1) * shard_size]
                     state_dict[f"{prefix}v_proj_a.bias.{i}"] = bias_shard
             
             # proj_b weights are shared and transposed [1536, 32]
             state_dict[f"{prefix}v_proj_b.weight"] = torch.eye(
                 self.hidden_size,
-                self.lora_rank // mp_size,
+                shard_size,
                 device=v_proj_weight.device,
                 dtype=v_proj_weight.dtype
             )
