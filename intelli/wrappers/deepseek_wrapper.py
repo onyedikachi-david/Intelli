@@ -91,7 +91,7 @@ class DeepSeekWrapper:
         # Filter config to only include expected arguments
         model_config = {}
         expected_args = [
-            'dim', 'n_layers', 'n_heads', 'n_kv_heads', 'vocab_size', 'multiple_of',
+            'dim', 'n_layers', 'n_heads', 'vocab_size', 'multiple_of',
             'ffn_dim_multiplier', 'norm_eps', 'max_batch_size', 'max_seq_len'
         ]
         for key in expected_args:
@@ -105,7 +105,6 @@ class DeepSeekWrapper:
                     "dim": 8192,
                     "n_layers": 80,
                     "n_heads": 64,
-                    "n_kv_heads": 8,
                     "vocab_size": 32000
                 })
             elif "32b" in self.model_variant.lower():
@@ -113,7 +112,6 @@ class DeepSeekWrapper:
                     "dim": 6144,
                     "n_layers": 60,
                     "n_heads": 48,
-                    "n_kv_heads": 8,
                     "vocab_size": 32000
                 })
             elif "14b" in self.model_variant.lower():
@@ -121,7 +119,6 @@ class DeepSeekWrapper:
                     "dim": 5120,
                     "n_layers": 40,
                     "n_heads": 40,
-                    "n_kv_heads": 8,
                     "vocab_size": 32000
                 })
             elif "8b" in self.model_variant.lower() or "7b" in self.model_variant.lower():
@@ -129,7 +126,6 @@ class DeepSeekWrapper:
                     "dim": 4096,
                     "n_layers": 32,
                     "n_heads": 32,
-                    "n_kv_heads": 8,
                     "vocab_size": 32000
                 })
             elif "1.5b" in self.model_variant.lower():
@@ -137,7 +133,6 @@ class DeepSeekWrapper:
                     "dim": 2048,
                     "n_layers": 24,
                     "n_heads": 16,
-                    "n_kv_heads": 8,
                     "vocab_size": 32000
                 })
         
