@@ -58,11 +58,56 @@ class RotaryEmbedding(nn.Module):
     """Rotary positional embeddings."""
     def __init__(self, dim: int, max_seq_len: int = 4096):
         super().__init__()
-        inv_freq = 1.0 / (10000 ** (torch.arange(0, dim//2, 2).float() / (dim//2)))
-        t = torch.arange(max_seq_len, dtype=inv_freq.dtype)
+        self.dim = dim
+        self.max_seq_len = max_seq_len
+        
+        # Initialize buffers with persistent=False
+        self.register_buffer("cos", None, persistent=False)
+        self.register_buffer("sin", None, persistent=False)
+        
+        # Precompute during initialization
+        self._precompute_rotary()
+
+    def _precompute_rotary(self):
+        inv_freq = 1.0 / (10000 ** (torch.arange(0, self.dim//2, 2).float() / (self.dim//2)))
+        t = torch.arange(self.max_seq_len, dtype=inv_freq.dtype)
         freqs = torch.outer(t, inv_freq)
-        self.register_buffer("cos", freqs.cos())
-        self.register_buffer("sin", freqs.sin())
+        
+        # Store as buffers but not in state dict
+        with torch.no_grad():
+            self.cos = freqs.cos()
+            self.sin = freqs.sin()
+
+    def forward(self, x: torch.Tensor, start_pos: int) -> torch.Tensor:
+        # Move inv_freq to correct device
+        self.cos = self.cos.to(x.device)
+        self.sin = self.sin.to(x.device)
+        
+        # Get sequence length and compute position embeddings
+        seq_len = x.shape[1]
+        t = torch.arange(start_pos, start_pos + seq_len, device=x.device)
+        freqs = torch.einsum("i,j->ij", t, self.cos)  # [seq_len, dim/2]
+        
+        # Compute cos and sin
+        cos = freqs
+        sin = torch.einsum("i,j->ij", t, self.sin)  # [seq_len, dim/2]
+        
+        # Reshape for broadcasting
+        cos = cos.view(1, seq_len, 1, -1)  # [1, seq_len, 1, dim/2]
+        sin = sin.view(1, seq_len, 1, -1)  # [1, seq_len, 1, dim/2]
+        
+        # Split input into half for rotation
+        x_half = x.shape[-1] // 2
+        x1 = x[..., :x_half]
+        x2 = x[..., x_half:]
+        
+        # Apply rotation using the RoPE formulation
+        rotated = torch.cat([
+            x1 * cos - x2 * sin,
+            x2 * cos + x1 * sin,
+        ], dim=-1)
+        
+        return rotated
 
 
 class Attention(nn.Module):
@@ -80,7 +125,7 @@ class Attention(nn.Module):
         self.v_proj = nn.Linear(args.dim, 256, bias=True)
         self.o_proj = nn.Linear(args.dim, args.dim, bias=False)
         
-        self.rope = RotaryEmbedding(dim=self.head_dim, max_seq_len=args.max_seq_len)
+        self.rope = RotaryEmbedding(args.qk_rope_head_dim, args.max_seq_len)
         self.scale = self.head_dim ** -0.5
         
         # Store rope dimensions
@@ -199,19 +244,4 @@ class Transformer(nn.Module):
         h = self.norm(h)
         logits = self.lm_head(h)
         
-        return logits
-
-    def _load_model(self):
-        state_dict = torch.load("model.pth", map_location="cpu")
-        model_state = self.state_dict()
-        
-        # Match existing parameters and ignore missing rope buffers
-        matched_state = {k: v for k,v in state_dict.items() 
-                        if k in model_state and v.shape == model_state[k].shape}
-        
-        # For conversion from old checkpoints
-        for name in model_state:
-            if "rope" in name and name not in matched_state:
-                print(f"Initializing new parameter: {name}")
-                
-        self.load_state_dict(matched_state, strict=False) 
+        return logits 
