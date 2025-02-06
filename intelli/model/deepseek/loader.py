@@ -9,6 +9,7 @@ from enum import Enum
 from tqdm import tqdm
 import torch
 from safetensors.torch import safe_open
+from huggingface_hub import hf_hub_download
 
 from .tokenizer import DeepSeekTokenizer
 
@@ -88,7 +89,7 @@ class ModelLoader:
     
     def download_from_hf(self, model_id: str, revision: str = "main") -> str:
         """
-        Download model files from HuggingFace.
+        Download model files from HuggingFace using the Hub API.
         
         Args:
             model_id: HuggingFace model ID
@@ -100,50 +101,66 @@ class ModelLoader:
         model_dir = os.path.join(self.cache_dir, model_id.replace('/', '_'))
         os.makedirs(model_dir, exist_ok=True)
         
-        # Download model files
-        files = ["config.json", "tokenizer.model", "tokenizer_config.json", "model.safetensors"]
-        base_url = f"https://huggingface.co/{model_id}/resolve/{revision}"
+        # Files to download
+        files = [
+            "config.json",
+            "tokenizer.model",
+            "tokenizer_config.json",
+            "model.safetensors"
+        ]
         
         for filename in files:
             local_path = os.path.join(model_dir, filename)
-            if not os.path.exists(local_path) or os.path.getsize(local_path) == 0:
-                url = f"{base_url}/{filename}"
-                try:
-                    # Try direct download first
-                    self._download_file(url, local_path)
+            try:
+                # Use HF Hub to download files
+                downloaded_path = hf_hub_download(
+                    repo_id=model_id,
+                    filename=filename,
+                    revision=revision,
+                    cache_dir=self.cache_dir,
+                    local_files_only=False,
+                    resume_download=True
+                )
+                
+                # If the file exists in a different location, copy it to our model directory
+                if os.path.exists(downloaded_path) and downloaded_path != local_path:
+                    import shutil
+                    shutil.copy2(downloaded_path, local_path)
                     
-                    # Verify file was downloaded successfully
-                    if os.path.getsize(local_path) == 0:
-                        raise requests.exceptions.HTTPError(f"Downloaded file {filename} is empty")
-                        
-                except (requests.exceptions.HTTPError, requests.exceptions.ConnectionError) as e:
-                    # If direct download fails, try alternative paths for tokenizer files
-                    if filename == "tokenizer.model":
-                        alt_paths = [
-                            f"{base_url}/pytorch_model.bin",  # Try pytorch model file
-                            f"https://huggingface.co/{model_id}/raw/{revision}/tokenizer.model",  # Try raw file
-                            f"https://huggingface.co/{model_id}/resolve/{revision}/tokenizer/tokenizer.model"  # Try tokenizer subdir
+            except Exception as e:
+                print(f"Warning: Failed to download {filename}: {str(e)}")
+                if filename == "tokenizer.model":
+                    # Try alternative paths for tokenizer
+                    try:
+                        tokenizer_paths = [
+                            "tokenizer/tokenizer.model",
+                            "pytorch_model.bin",  # Some models store tokenizer here
+                            "tokenizer.json"  # Try json format
                         ]
-                        for alt_url in alt_paths:
+                        for alt_path in tokenizer_paths:
                             try:
-                                self._download_file(alt_url, local_path)
-                                if os.path.getsize(local_path) > 0:
+                                downloaded_path = hf_hub_download(
+                                    repo_id=model_id,
+                                    filename=alt_path,
+                                    revision=revision,
+                                    cache_dir=self.cache_dir,
+                                    local_files_only=False,
+                                    resume_download=True
+                                )
+                                if os.path.exists(downloaded_path):
+                                    shutil.copy2(downloaded_path, local_path)
                                     break
                             except:
                                 continue
-                        
-                        if os.path.getsize(local_path) == 0:
-                            print(f"Warning: Could not download {filename}, will attempt to use default tokenizer")
-                            # Copy default tokenizer if available
-                            default_tokenizer = os.path.join(os.path.dirname(__file__), "default_tokenizer.model")
-                            if os.path.exists(default_tokenizer):
-                                import shutil
-                                shutil.copy2(default_tokenizer, local_path)
-                    else:
-                        print(f"Warning: {filename} not found or failed to download, skipping...")
-                        continue
+                    except Exception as e:
+                        print(f"Warning: Could not download tokenizer from alternative paths: {str(e)}")
+                        # Try to use a default tokenizer as last resort
+                        default_tokenizer = os.path.join(os.path.dirname(__file__), "default_tokenizer.model")
+                        if os.path.exists(default_tokenizer):
+                            shutil.copy2(default_tokenizer, local_path)
+                continue
         
-        # Create a simple index file if not downloaded
+        # Create index file if needed
         index_path = os.path.join(model_dir, "model.safetensors.index.json")
         if not os.path.exists(index_path):
             index = {
