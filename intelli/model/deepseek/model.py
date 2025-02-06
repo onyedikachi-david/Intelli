@@ -138,8 +138,16 @@ class Attention(nn.Module):
         v = self.v_proj(x).view(B, T, 1, 256).expand(B, T, H, 256)  # [B, T, H, 256]
         
         # Apply rotary embeddings only to the query projection
-        q_rope = self.rope(q[..., :self.rope_dim*2], start_pos)  # Apply RoPE to first rope_dim*2 dims
-        q = torch.cat([q_rope, q[..., self.rope_dim*2:]], dim=-1) if q.shape[-1] > self.rope_dim*2 else q_rope
+        # Reshape query to match RoPE dimensions
+        q_rope_dim = min(q.shape[-1], self.rope_dim * 2)  # Ensure we don't exceed tensor dimensions
+        q_rope = q[..., :q_rope_dim].view(B, T, H, -1)  # [B, T, H, rope_dim*2]
+        q_rope = self.rope(q_rope, start_pos)  # Apply RoPE
+        
+        # Concatenate with remaining dimensions if any
+        if q.shape[-1] > q_rope_dim:
+            q = torch.cat([q_rope, q[..., q_rope_dim:]], dim=-1)
+        else:
+            q = q_rope
         
         # Compute attention
         attn = torch.einsum("bthd,bshd->bhts", q, k) * self.scale
