@@ -17,7 +17,7 @@ class ModelArgs:
     max_seq_len: int = 4096 * 4
     dtype: Literal["bf16", "fp8"] = "bf16"
     vocab_size: int = 102400
-    dim: int = 2048
+    dim: int = 1536  # Hidden dimension matching checkpoint
     inter_dim: int = 10944
     moe_inter_dim: int = 1408
     n_layers: int = 27
@@ -31,7 +31,7 @@ class ModelArgs:
     score_func: Literal["softmax", "sigmoid"] = "softmax"
     route_scale: float = 1.
     q_lora_rank: int = 0
-    kv_lora_rank: int = 512
+    kv_lora_rank: int = 256  # LoRA rank matching checkpoint
     qk_nope_head_dim: int = 128
     qk_rope_head_dim: int = 64
     v_head_dim: int = 128
@@ -128,10 +128,10 @@ class Attention(nn.Module):
         
         # Key/Value use LoRA-style projections
         self.k_proj_a = nn.Linear(self.hidden_size, self.lora_rank, bias=True)
-        self.k_proj_b = nn.Linear(self.lora_rank, self.hidden_size, bias=True)
+        self.k_proj_b = nn.Linear(self.lora_rank, self.hidden_size, bias=False)
         
         self.v_proj_a = nn.Linear(self.hidden_size, self.lora_rank, bias=True)
-        self.v_proj_b = nn.Linear(self.lora_rank, self.hidden_size, bias=True)
+        self.v_proj_b = nn.Linear(self.lora_rank, self.hidden_size, bias=False)
         
         self.o_proj = nn.Linear(self.hidden_size, self.hidden_size, bias=False)
         
@@ -143,122 +143,52 @@ class Attention(nn.Module):
             self.scale *= args.mscale
 
     def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs):
-        """Custom state dict loading to handle weight conversion."""
+        """Custom state dict loading to handle weight conversion and model parallel sharding."""
         # Handle key projection weights
         k_proj_weight = state_dict.pop(prefix + 'k_proj.weight', None)
         k_proj_bias = state_dict.pop(prefix + 'k_proj.bias', None)
         
         if k_proj_weight is not None:
-            try:
-                # Check for non-finite values
-                if not torch.isfinite(k_proj_weight).all():
-                    k_proj_weight = torch.nan_to_num(k_proj_weight, nan=0.0, posinf=0.0, neginf=0.0)
+            # Handle model parallel sharding
+            mp_size = k_proj_weight.size(0) // self.lora_rank
+            k_proj_weight = k_proj_weight.view(mp_size, self.lora_rank, -1)
+            
+            # Convert to LoRA format
+            for i in range(mp_size):
+                shard = k_proj_weight[i]
+                # Add proj_a weights
+                state_dict[f"{prefix}k_proj_a.weight.{i}"] = shard
                 
-                # Add small noise for numerical stability
-                noise_scale = 1e-6
-                k_proj_weight = k_proj_weight + torch.randn_like(k_proj_weight) * noise_scale
-                
-                # Convert k_proj weights to LoRA format
-                rank = self.lora_rank
-                try:
-                    # Try SVD with the stabilized matrix
-                    U, S, Vh = torch.linalg.svd(k_proj_weight, full_matrices=False)
-                except torch._C._LinAlgError:
-                    # Fallback: Add diagonal regularization
-                    reg_scale = 1e-4
-                    regularized_weight = k_proj_weight + torch.eye(
-                        k_proj_weight.size(-1),
-                        device=k_proj_weight.device,
-                        dtype=k_proj_weight.dtype
-                    ) * reg_scale
-                    U, S, Vh = torch.linalg.svd(regularized_weight, full_matrices=False)
-                
-                # Take top-k components with numerical stability
-                eps = 1e-6
-                S = torch.clamp(S, min=eps)
-                U = U[:, :rank] * torch.sqrt(S[:rank]).unsqueeze(0)
-                Vh = torch.sqrt(S[:rank]).unsqueeze(1) * Vh[:rank, :]
-                
-                # Assign to a and b projections
-                state_dict[prefix + 'k_proj_a.weight'] = U.t()
-                state_dict[prefix + 'k_proj_b.weight'] = Vh
                 if k_proj_bias is not None:
-                    state_dict[prefix + 'k_proj_b.bias'] = k_proj_bias
-                    state_dict[prefix + 'k_proj_a.bias'] = torch.zeros_like(k_proj_bias[:rank])
-            except Exception as e:
-                error_msgs.append(f'Error converting k_proj weights: {str(e)}')
-                # Fallback: Initialize with random weights
-                state_dict[prefix + 'k_proj_a.weight'] = torch.randn(
-                    self.lora_rank,
-                    self.hidden_size,
-                    device=k_proj_weight.device,
-                    dtype=k_proj_weight.dtype
-                ) * 0.02
-                state_dict[prefix + 'k_proj_b.weight'] = torch.randn(
-                    self.hidden_size,
-                    self.lora_rank,
-                    device=k_proj_weight.device,
-                    dtype=k_proj_weight.dtype
-                ) * 0.02
+                    bias_shard = k_proj_bias[i * self.lora_rank:(i + 1) * self.lora_rank]
+                    state_dict[f"{prefix}k_proj_a.bias.{i}"] = bias_shard
+            
+            # proj_b weights are shared across shards
+            state_dict[f"{prefix}k_proj_b.weight"] = torch.eye(self.hidden_size, self.lora_rank)
         
         # Handle value projection weights
         v_proj_weight = state_dict.pop(prefix + 'v_proj.weight', None)
         v_proj_bias = state_dict.pop(prefix + 'v_proj.bias', None)
         
         if v_proj_weight is not None:
-            try:
-                # Check for non-finite values
-                if not torch.isfinite(v_proj_weight).all():
-                    v_proj_weight = torch.nan_to_num(v_proj_weight, nan=0.0, posinf=0.0, neginf=0.0)
+            # Handle model parallel sharding
+            mp_size = v_proj_weight.size(0) // self.lora_rank
+            v_proj_weight = v_proj_weight.view(mp_size, self.lora_rank, -1)
+            
+            # Convert to LoRA format
+            for i in range(mp_size):
+                shard = v_proj_weight[i]
+                # Add proj_a weights
+                state_dict[f"{prefix}v_proj_a.weight.{i}"] = shard
                 
-                # Add small noise for numerical stability
-                noise_scale = 1e-6
-                v_proj_weight = v_proj_weight + torch.randn_like(v_proj_weight) * noise_scale
-                
-                # Convert v_proj weights to LoRA format
-                rank = self.lora_rank
-                try:
-                    # Try SVD with the stabilized matrix
-                    U, S, Vh = torch.linalg.svd(v_proj_weight, full_matrices=False)
-                except torch._C._LinAlgError:
-                    # Fallback: Add diagonal regularization
-                    reg_scale = 1e-4
-                    regularized_weight = v_proj_weight + torch.eye(
-                        v_proj_weight.size(-1),
-                        device=v_proj_weight.device,
-                        dtype=v_proj_weight.dtype
-                    ) * reg_scale
-                    U, S, Vh = torch.linalg.svd(regularized_weight, full_matrices=False)
-                
-                # Take top-k components with numerical stability
-                eps = 1e-6
-                S = torch.clamp(S, min=eps)
-                U = U[:, :rank] * torch.sqrt(S[:rank]).unsqueeze(0)
-                Vh = torch.sqrt(S[:rank]).unsqueeze(1) * Vh[:rank, :]
-                
-                # Assign to a and b projections
-                state_dict[prefix + 'v_proj_a.weight'] = U.t()
-                state_dict[prefix + 'v_proj_b.weight'] = Vh
                 if v_proj_bias is not None:
-                    state_dict[prefix + 'v_proj_b.bias'] = v_proj_bias
-                    state_dict[prefix + 'v_proj_a.bias'] = torch.zeros_like(v_proj_bias[:rank])
-            except Exception as e:
-                error_msgs.append(f'Error converting v_proj weights: {str(e)}')
-                # Fallback: Initialize with random weights
-                state_dict[prefix + 'v_proj_a.weight'] = torch.randn(
-                    self.lora_rank,
-                    self.hidden_size,
-                    device=v_proj_weight.device,
-                    dtype=v_proj_weight.dtype
-                ) * 0.02
-                state_dict[prefix + 'v_proj_b.weight'] = torch.randn(
-                    self.hidden_size,
-                    self.lora_rank,
-                    device=v_proj_weight.device,
-                    dtype=v_proj_weight.dtype
-                ) * 0.02
+                    bias_shard = v_proj_bias[i * self.lora_rank:(i + 1) * self.lora_rank]
+                    state_dict[f"{prefix}v_proj_a.bias.{i}"] = bias_shard
+            
+            # proj_b weights are shared across shards
+            state_dict[f"{prefix}v_proj_b.weight"] = torch.eye(self.hidden_size, self.lora_rank)
         
-        # Load the rest of the state dict
+        # Let parent class handle the rest
         super()._load_from_state_dict(state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs)
 
     def forward(self, x: torch.Tensor, start_pos: int, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
