@@ -307,18 +307,32 @@ class DeepSeekWrapper:
                 # Print raw logits stats
                 print(f"Raw logits - min: {next_token_logits.min().item():.2f}, max: {next_token_logits.max().item():.2f}, mean: {next_token_logits.mean().item():.2f}")
                 
-                # Replace NaN/Inf values
+                # Handle NaN/Inf values before softmax
                 next_token_logits = torch.where(
                     torch.isnan(next_token_logits) | torch.isinf(next_token_logits),
-                    torch.full_like(next_token_logits, -1e4),
+                    torch.zeros_like(next_token_logits),
                     next_token_logits
                 )
                 
-                # Apply softmax for numerical stability
-                next_token_logits = torch.log_softmax(next_token_logits, dim=-1)
+                # Add small epsilon to avoid numerical instability
+                next_token_logits = next_token_logits + 1e-8
+                
+                # Apply temperature scaling first
+                if self.temperature > 0:
+                    next_token_logits = next_token_logits / max(self.temperature, 1e-6)
+                
+                # Apply softmax to get probabilities
+                probs = torch.softmax(next_token_logits, dim=-1)
+                
+                # Ensure valid probability distribution
+                probs = torch.where(
+                    torch.isnan(probs) | torch.isinf(probs) | (probs < 0),
+                    torch.ones_like(probs) / probs.size(-1),
+                    probs
+                )
+                probs = probs / probs.sum()  # Renormalize
                 
                 # Debug probability distribution
-                probs = torch.softmax(next_token_logits, dim=-1)
                 print(f"Probability sum: {probs.sum().item():.6f}")
                 print(f"Max probability: {probs.max().item():.6f}")
                 print(f"Has valid distribution: {(probs >= 0).all().item() and (probs <= 1).all().item()}")
@@ -346,8 +360,13 @@ class DeepSeekWrapper:
                     
                     # Apply top-k filtering
                     if self.top_k > 0:
-                        indices_to_remove = torch.topk(scaled_logits, k=min(self.top_k, tokenizer_vocab_size))[1]
-                        scaled_logits[indices_to_remove] = float('-inf')
+                        values, _ = torch.topk(scaled_logits, min(self.top_k, tokenizer_vocab_size))
+                        min_value = values[-1]
+                        scaled_logits = torch.where(
+                            scaled_logits < min_value,
+                            torch.full_like(scaled_logits, float('-inf')),
+                            scaled_logits
+                        )
                     
                     # Apply top-p filtering
                     if self.top_p < 1.0:
@@ -361,11 +380,26 @@ class DeepSeekWrapper:
                         indices_to_remove = sorted_indices[sorted_indices_to_remove]
                         scaled_logits[indices_to_remove] = float('-inf')
                     
-                    # Apply softmax
+                    # Get probabilities
                     probs = torch.softmax(scaled_logits, dim=-1)
                     
+                    # Ensure valid probability distribution
+                    probs = torch.where(
+                        torch.isnan(probs) | torch.isinf(probs) | (probs < 0),
+                        torch.ones_like(probs) / probs.size(-1),
+                        probs
+                    )
+                    probs = probs / probs.sum()  # Renormalize
+                    
                     # Sample next token
-                    next_token = torch.multinomial(probs, num_samples=1)
+                    try:
+                        next_token = torch.multinomial(probs, num_samples=1)
+                    except RuntimeError as e:
+                        print(f"\nError sampling token: {str(e)}")
+                        print(f"Probability stats - min: {probs.min().item():.6f}, max: {probs.max().item():.6f}, sum: {probs.sum().item():.6f}")
+                        # Fallback to argmax
+                        next_token = probs.argmax().unsqueeze(0)
+                    
                     token_id = next_token.item()
                     
                     # Validate token ID
@@ -415,22 +449,14 @@ class DeepSeekWrapper:
                         elif len(logits.shape) == 2:
                             next_token_logits = logits[-1].clone()
                         
-                        # Convert to float32 and apply log_softmax
+                        # Convert to float32 and handle NaN/Inf
                         next_token_logits = next_token_logits.to(torch.float32)
-                        next_token_logits = torch.log_softmax(next_token_logits, dim=-1)
-                    
-                    # Check for stop conditions
-                    if token_id in [self.tokenizer.eos_token_id, self.tokenizer.user_token_id]:
-                        print("\nGeneration complete: End token reached")
-                        break
-                    elif consecutive_spaces >= 5:
-                        print("\nGeneration complete: Multiple spaces detected")
-                        break
-                    elif len(response_text) > 0 and not response_text[-1].strip():
-                        last_char = response_text.rstrip()[-1] if response_text.rstrip() else ""
-                        if last_char in ".!?" and i > 20:
-                            print("\nGeneration complete: Natural end point reached")
-                            break
+                        next_token_logits = torch.where(
+                            torch.isnan(next_token_logits) | torch.isinf(next_token_logits),
+                            torch.zeros_like(next_token_logits),
+                            next_token_logits
+                        )
+                        next_token_logits = next_token_logits + 1e-8  # Add small epsilon
             
             print("\n")
             
