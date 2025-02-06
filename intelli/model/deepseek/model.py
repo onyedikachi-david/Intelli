@@ -58,46 +58,58 @@ class RotaryEmbedding(nn.Module):
     """Rotary positional embeddings."""
     def __init__(self, args: ModelArgs):
         super().__init__()
-        dim = args.qk_rope_head_dim
-        base = args.rope_theta
+        self.dim = args.qk_rope_head_dim
+        self.max_seq_len = args.max_seq_len
         
-        # Compute position embeddings but don't register as buffers
-        self.inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2).float() / dim))
+        # Compute position embeddings
+        inv_freq = 1.0 / (args.rope_theta ** (torch.arange(0, self.dim, 2).float() / self.dim))
         
         # Apply scaling for extended context
         if args.max_seq_len > args.original_seq_len:
             scale = math.log(args.rope_factor) / 2.0
-            self.inv_freq = self.inv_freq * args.rope_factor ** (scale / dim)
+            inv_freq = inv_freq * args.rope_factor ** (scale / self.dim)
+            
+        # Precompute rotary embeddings
+        t = torch.arange(self.max_seq_len).type_as(inv_freq)
+        freqs = torch.einsum('i,j->ij', t, inv_freq)
+        emb = torch.cat((freqs, freqs), dim=-1)
         
-        # Store dimensions for use in forward pass
-        self.dim = dim
-
-    def _precompute_rotary(self):
-        # CORRECTED: Remove step=2 to get full dimension
-        inv_freq = 1.0 / (10000 ** (torch.arange(0, self.dim//2).float() / (self.dim//2)))
-        t = torch.arange(self.max_seq_len, dtype=inv_freq.dtype)
-        freqs = torch.outer(t, inv_freq)
-        
-        # Store buffers with proper dimensions
-        self.register_buffer("cos", freqs.cos(), persistent=False)
-        self.register_buffer("sin", freqs.sin(), persistent=False)
+        # Register buffers for cos and sin
+        cos = emb.cos()
+        sin = emb.sin()
+        self.register_buffer('cos', cos, persistent=False)
+        self.register_buffer('sin', sin, persistent=False)
 
     def forward(self, x: torch.Tensor, start_pos: int) -> torch.Tensor:
-        seq_len = x.size(1)
+        """Apply rotary embeddings to input tensor.
         
-        # Get precomputed values with proper dimensions
-        cos = self.cos[start_pos : start_pos + seq_len]  # [seq_len, dim//2]
-        sin = self.sin[start_pos : start_pos + seq_len]  # [seq_len, dim//2]
+        Args:
+            x: Input tensor of shape [batch, seq_len, heads, head_dim]
+            start_pos: Starting position for computing position embeddings
+            
+        Returns:
+            Tensor with rotary embeddings applied
+        """
+        seq_len = x.shape[1]
+        
+        # Get position-specific rotary embeddings
+        cos = self.cos[start_pos:start_pos + seq_len]
+        sin = self.sin[start_pos:start_pos + seq_len]
         
         # Reshape for broadcasting
-        cos = cos.view(1, seq_len, 1, -1)  # [1, seq_len, 1, dim//2]
-        sin = sin.view(1, seq_len, 1, -1)  # [1, seq_len, 1, dim//2]
+        cos = cos.view(1, seq_len, 1, -1)  # [1, seq_len, 1, dim]
+        sin = sin.view(1, seq_len, 1, -1)  # [1, seq_len, 1, dim]
         
-        # Split and rotate features
-        x1, x2 = x.chunk(2, dim=-1)
-        rotated = torch.cat((x1 * cos - x2 * sin, x2 * cos + x1 * sin), dim=-1)
+        # Split input into even and odd dimensions
+        x_split = x.chunk(2, dim=-1)
         
-        return rotated
+        # Apply rotary embeddings
+        rx = torch.cat([
+            x_split[0] * cos - x_split[1] * sin,
+            x_split[0] * sin + x_split[1] * cos,
+        ], dim=-1)
+        
+        return rx
 
 
 class Attention(nn.Module):
