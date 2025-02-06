@@ -299,6 +299,10 @@ class ModelLoader:
             # For 1.5B model
             hidden_dim = 2048
             intermediate_dim = 5440
+            num_attention_heads = 16
+            head_dim = hidden_dim // num_attention_heads
+            num_key_value_heads = 8  # Number of KV heads for grouped attention
+            num_key_value_groups = num_attention_heads // num_key_value_heads
         else:
             # For other variants, use dimensions from the checkpoint
             if name == "model.embed_tokens.weight" or name == "lm_head.weight":
@@ -312,6 +316,19 @@ class ModelLoader:
                 else:
                     hidden_dim = 1536  # Fallback default
             
+            # Calculate attention dimensions from checkpoint
+            for key in self.safetensors_header:
+                if "self_attn.v_proj_a.0.weight" in key:
+                    num_key_value_heads = len([k for k in self.safetensors_header if "v_proj_a" in k and k.endswith(".weight")])
+                    head_dim = self.safetensors_header[key]["shape"][0]
+                    break
+            else:
+                num_key_value_heads = 32
+                head_dim = 24
+            
+            num_attention_heads = num_key_value_heads * 2  # Common ratio in transformer models
+            num_key_value_groups = num_attention_heads // num_key_value_heads
+            
             # Calculate intermediate_dim from MLP layers
             for key in self.safetensors_header:
                 if "mlp.up_proj.weight" in key:
@@ -319,43 +336,56 @@ class ModelLoader:
                     break
                 else:
                     intermediate_dim = hidden_dim * 4  # Common ratio in transformer models
-            
+        
         # Map tensor names to remove "model." prefix if present
         clean_name = name.replace("model.", "")
         
-        # Determine vocab size from embedding/lm_head dimensions
-        if clean_name in ["embed_tokens.weight", "lm_head.weight"]:
+        # Handle attention projection layers
+        if "self_attn" in clean_name:
+            if "proj_a" in clean_name:
+                # Handle sharded key/value projection weights
+                if any(x in clean_name for x in ["k_proj_a", "v_proj_a"]):
+                    shard_idx = int(clean_name.split(".")[-2])  # Get shard index
+                    if shard_idx < num_key_value_heads:
+                        if clean_name.endswith(".weight"):
+                            shape = (head_dim, hidden_dim)
+                        elif clean_name.endswith(".bias"):
+                            shape = (head_dim,)
+                else:
+                    # Query projection
+                    if clean_name.endswith(".weight"):
+                        shape = (head_dim * num_attention_heads, hidden_dim)
+                    elif clean_name.endswith(".bias"):
+                        shape = (head_dim * num_attention_heads,)
+            elif "proj_b" in clean_name:
+                # Handle key/value projection second matrix
+                if clean_name.endswith(".weight"):
+                    shape = (hidden_dim, head_dim)
+            elif "o_proj" in clean_name:
+                # Output projection
+                if clean_name.endswith(".weight"):
+                    shape = (hidden_dim, hidden_dim)
+                elif clean_name.endswith(".bias"):
+                    shape = (hidden_dim,)
+        # Handle embedding and lm_head
+        elif clean_name in ["embed_tokens.weight", "lm_head.weight"]:
             vocab_size = original_shape[0]  # Use vocab size from checkpoint
             shape = original_shape  # Keep original shape for these layers
-        # Adjust shape for other layers
-        elif clean_name.endswith(".weight") and original_shape[-1] == hidden_dim:
-            # Update hidden dimension for all weight matrices
-            new_shape = list(original_shape)
-            if "mlp." in clean_name:
+        # Handle MLP layers
+        elif "mlp." in clean_name:
+            if clean_name.endswith(".weight"):
                 if "gate_proj" in clean_name or "up_proj" in clean_name:
-                    new_shape[0] = intermediate_dim
+                    shape = (intermediate_dim, hidden_dim)
                 elif "down_proj" in clean_name:
-                    new_shape[-1] = intermediate_dim
-            shape = tuple(new_shape)
-        elif clean_name.endswith(".weight") and original_shape[0] == hidden_dim:
-            # Update input dimension for all weight matrices
-            new_shape = list(original_shape)
-            if "mlp." in clean_name:
+                    shape = (hidden_dim, intermediate_dim)
+            elif clean_name.endswith(".bias"):
                 if "gate_proj" in clean_name or "up_proj" in clean_name:
-                    new_shape[-1] = intermediate_dim
+                    shape = (intermediate_dim,)
                 elif "down_proj" in clean_name:
-                    new_shape[0] = intermediate_dim
-            shape = tuple(new_shape)
-        elif clean_name.endswith(".bias") or (clean_name.endswith(".weight") and len(original_shape) == 1):
-            # Update all 1D tensors (biases and layernorm weights)
-            if original_shape[0] in [hidden_dim, intermediate_dim]:
-                shape = original_shape  # Keep original shape
-            elif "self_attn" in clean_name and "proj_a" in clean_name:
-                shape = (16,)  # Updated from 32 for LoRA
-        
-        # Special handling for norm layers - keep original shape
-        if clean_name in ["norm.weight", "input_layernorm.weight", "post_attention_layernorm.weight"]:
-            shape = original_shape
+                    shape = (hidden_dim,)
+        # Handle norm layers
+        elif any(x in clean_name for x in ["norm.weight", "input_layernorm.weight", "post_attention_layernorm.weight"]):
+            shape = (hidden_dim,)
         
         # Verify tensor size matches target shape
         target_size = np.prod(shape)
@@ -364,8 +394,17 @@ class ModelLoader:
             print(f"Actual size: {actual_size}, Target shape: {shape} (size {target_size})")
             print(f"Original shape: {original_shape}")
             
+            # For attention layers, try to adjust dimensions
+            if "self_attn" in clean_name:
+                if "proj_a" in clean_name and clean_name.endswith(".weight"):
+                    # Adjust head dimension based on actual size
+                    head_dim = actual_size // hidden_dim
+                    shape = (head_dim, hidden_dim)
+                elif "proj_b" in clean_name and clean_name.endswith(".weight"):
+                    # Adjust for proj_b matrices
+                    shape = (hidden_dim, actual_size // hidden_dim)
             # For MLP layers, try to adjust dimensions
-            if "mlp." in clean_name and len(shape) == 2:
+            elif "mlp." in clean_name and len(shape) == 2:
                 if actual_size % shape[1] == 0:
                     shape = (actual_size // shape[1], shape[1])
                 elif actual_size % shape[0] == 0:
