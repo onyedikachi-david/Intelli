@@ -85,12 +85,17 @@ class RotaryEmbedding(nn.Module):
         cos = torch.cos(freqs)  # [seq_len, dim/2]
         sin = torch.sin(freqs)  # [seq_len, dim/2]
         
-        # Reshape for broadcasting
+        # Reshape x to match expected dimensions
+        x_shape = x.shape
+        x = x.view(*x_shape[:-1], -1, 2)  # [..., dim/2, 2]
+        
+        # Reshape cos and sin for broadcasting
         cos = cos.view(1, seq_len, 1, cos.shape[-1])  # [1, seq_len, 1, dim/2]
         sin = sin.view(1, seq_len, 1, sin.shape[-1])  # [1, seq_len, 1, dim/2]
         
-        # Ensure input tensor has correct shape
-        x = x.view(*x.shape[:-1], -1, 2)  # [..., dim/2, 2]
+        # Ensure cos and sin match x's dimension
+        cos = cos.expand(x_shape[0], -1, x_shape[2], -1)  # [batch, seq_len, heads, dim/2]
+        sin = sin.expand(x_shape[0], -1, x_shape[2], -1)  # [batch, seq_len, heads, dim/2]
         
         # Split input into half for rotation
         x1, x2 = x.unbind(-1)  # [..., dim/2], [..., dim/2]
