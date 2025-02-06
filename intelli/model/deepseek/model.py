@@ -72,14 +72,24 @@ class RotaryEmbedding(nn.Module):
         # Store dimensions for use in forward pass
         self.dim = dim
 
-    def forward(self, x: torch.Tensor, start_pos: int = 0) -> torch.Tensor:
+    def _precompute_rotary(self):
+        # CORRECTED: Remove step=2 to get full dimension
+        inv_freq = 1.0 / (10000 ** (torch.arange(0, self.dim//2).float() / (self.dim//2)))
+        t = torch.arange(self.max_seq_len, dtype=inv_freq.dtype)
+        freqs = torch.outer(t, inv_freq)
+        
+        # Store buffers with proper dimensions
+        self.register_buffer("cos", freqs.cos(), persistent=False)
+        self.register_buffer("sin", freqs.sin(), persistent=False)
+
+    def forward(self, x: torch.Tensor, start_pos: int) -> torch.Tensor:
         seq_len = x.size(1)
         
-        # Get precomputed cos/sin values
+        # Get precomputed values with proper dimensions
         cos = self.cos[start_pos : start_pos + seq_len]  # [seq_len, dim//2]
         sin = self.sin[start_pos : start_pos + seq_len]  # [seq_len, dim//2]
         
-        # Reshape for broadcasting with attention heads
+        # Reshape for broadcasting
         cos = cos.view(1, seq_len, 1, -1)  # [1, seq_len, 1, dim//2]
         sin = sin.view(1, seq_len, 1, -1)  # [1, seq_len, 1, dim//2]
         
