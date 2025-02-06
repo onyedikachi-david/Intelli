@@ -259,13 +259,31 @@ class DeepSeekWrapper:
                 
                 # Get last token logits based on shape
                 if len(logits.shape) == 3:
-                    next_token_logits = logits[0, -1, :vocab_size].clone()  # Limit to tokenizer vocab size
+                    # Get full logits first
+                    next_token_logits = logits[0, -1].clone()
+                    # Create a mask for valid token IDs
+                    valid_tokens_mask = torch.zeros_like(next_token_logits, dtype=torch.bool)
+                    valid_tokens_mask[:vocab_size] = True
+                    # Set invalid token logits to large negative value
+                    next_token_logits = torch.where(
+                        valid_tokens_mask,
+                        next_token_logits,
+                        torch.full_like(next_token_logits, float('-inf'))
+                    )
                 elif len(logits.shape) == 2:
-                    next_token_logits = logits[-1, :vocab_size].clone()  # Limit to tokenizer vocab size
+                    # Same for 2D logits
+                    next_token_logits = logits[-1].clone()
+                    valid_tokens_mask = torch.zeros_like(next_token_logits, dtype=torch.bool)
+                    valid_tokens_mask[:vocab_size] = True
+                    next_token_logits = torch.where(
+                        valid_tokens_mask,
+                        next_token_logits,
+                        torch.full_like(next_token_logits, float('-inf'))
+                    )
                 else:
                     raise ValueError(f"Unexpected logits shape: {logits.shape}")
                 
-                # Replace NaN/Inf values with large negative numbers
+                # Replace NaN/Inf values with large negative numbers only for valid tokens
                 next_token_logits = torch.where(
                     torch.isnan(next_token_logits) | torch.isinf(next_token_logits),
                     torch.full_like(next_token_logits, -1e4),
@@ -277,10 +295,11 @@ class DeepSeekWrapper:
                 print(f"Has nan values after fix: {torch.isnan(next_token_logits).any().item()}")
                 
                 # Print initial logits stats for debugging
-                print(f"Initial logits - min: {next_token_logits.min().item():.2f}, max: {next_token_logits.max().item():.2f}, mean: {next_token_logits.mean().item():.2f}")
+                valid_logits = next_token_logits[:vocab_size]
+                print(f"Initial logits - min: {valid_logits.min().item():.2f}, max: {valid_logits.max().item():.2f}, mean: {valid_logits.mean().item():.2f}")
                 
                 for i in range(self.max_length):
-                    # Apply repetition penalty
+                    # Apply repetition penalty only to valid tokens
                     if len(generated) > 0:
                         for token in generated:
                             if token < vocab_size:  # Only apply to valid token IDs
@@ -295,9 +314,11 @@ class DeepSeekWrapper:
                     else:
                         scaled_logits = next_token_logits
                     
-                    # Apply top-k filtering
+                    # Apply top-k filtering only to valid tokens
                     if self.top_k > 0:
-                        values, _ = torch.topk(scaled_logits, min(self.top_k, scaled_logits.size(-1)))
+                        # Get top-k only from valid tokens
+                        valid_logits = scaled_logits[:vocab_size]
+                        values, _ = torch.topk(valid_logits, min(self.top_k, vocab_size))
                         min_value = values[-1]
                         scaled_logits = torch.where(
                             scaled_logits < min_value,
@@ -305,9 +326,11 @@ class DeepSeekWrapper:
                             scaled_logits
                         )
                     
-                    # Apply top-p (nucleus) filtering
+                    # Apply top-p (nucleus) filtering only to valid tokens
                     if self.top_p < 1.0:
-                        sorted_logits, sorted_indices = torch.sort(scaled_logits, descending=True)
+                        # Sort only valid tokens
+                        valid_logits = scaled_logits[:vocab_size]
+                        sorted_logits, sorted_indices = torch.sort(valid_logits, descending=True)
                         cumulative_probs = torch.softmax(sorted_logits, dim=-1).cumsum(dim=-1)
                         
                         # Remove tokens with cumulative probability above the threshold
@@ -315,40 +338,49 @@ class DeepSeekWrapper:
                         sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
                         sorted_indices_to_remove[..., 0] = 0
                         
+                        # Map back to original indices
                         indices_to_remove = sorted_indices[sorted_indices_to_remove]
-                        scaled_logits[indices_to_remove] = float('-inf')
+                        scaled_logits[:vocab_size][indices_to_remove] = float('-inf')
                     
-                    # Ensure finite values for softmax
-                    max_logit = scaled_logits.max()
-                    scaled_logits = scaled_logits - max_logit
+                    # Ensure finite values for softmax (only for valid tokens)
+                    valid_logits = scaled_logits[:vocab_size]
+                    max_logit = valid_logits.max()
+                    valid_logits = valid_logits - max_logit
+                    scaled_logits[:vocab_size] = valid_logits
                     
-                    # Handle any remaining inf values
-                    scaled_logits = torch.where(
-                        torch.isinf(scaled_logits),
-                        torch.full_like(scaled_logits, -1e4),
-                        scaled_logits
+                    # Handle any remaining inf values for valid tokens
+                    scaled_logits[:vocab_size] = torch.where(
+                        torch.isinf(valid_logits),
+                        torch.full_like(valid_logits, -1e4),
+                        valid_logits
                     )
                     
-                    # Apply softmax with better numerical stability
-                    exp_logits = torch.exp(scaled_logits)
-                    probs = exp_logits / (exp_logits.sum() + 1e-10)  # Add small epsilon to prevent division by zero
+                    # Apply softmax only to valid tokens
+                    valid_logits = scaled_logits[:vocab_size]
+                    exp_logits = torch.exp(valid_logits)
+                    probs = torch.zeros_like(scaled_logits)
+                    probs[:vocab_size] = exp_logits / (exp_logits.sum() + 1e-10)
                     
                     # Debug probability distribution
                     if i == 0:
-                        print(f"Probability sum: {probs.sum().item():.6f}")
-                        print(f"Max probability: {probs.max().item():.6f}")
-                        print(f"Has valid distribution: {(probs >= 0).all().item() and (probs <= 1).all().item()}")
-                        print(f"Top 5 probabilities: {probs.topk(5)[0].tolist()}")
-                        print(f"Top 5 token IDs: {probs.topk(5)[1].tolist()}")
+                        valid_probs = probs[:vocab_size]
+                        print(f"Probability sum: {valid_probs.sum().item():.6f}")
+                        print(f"Max probability: {valid_probs.max().item():.6f}")
+                        print(f"Has valid distribution: {(valid_probs >= 0).all().item() and (valid_probs <= 1).all().item()}")
+                        top_probs, top_indices = valid_probs.topk(5)
+                        print(f"Top 5 probabilities: {top_probs.tolist()}")
+                        print(f"Top 5 token IDs: {top_indices.tolist()}")
+                        # Print actual tokens for debugging
+                        print("Top 5 tokens:", [self.tokenizer.decode([idx.item()]) for idx in top_indices])
                     
                     # Ensure valid probabilities
-                    if torch.isnan(probs).any() or (probs.sum() - 1.0).abs() > 1e-3:
+                    if torch.isnan(probs).any() or (probs[:vocab_size].sum() - 1.0).abs() > 1e-3:
                         print("\nWarning: Invalid probabilities detected, falling back to greedy selection")
-                        # Use argmax directly for greedy selection
-                        next_token = torch.argmax(scaled_logits).reshape(1)
+                        # Use argmax only on valid tokens
+                        next_token = torch.argmax(scaled_logits[:vocab_size]).reshape(1)
                     else:
-                        # Sample from the filtered distribution
-                        next_token = torch.multinomial(probs, num_samples=1)
+                        # Sample only from valid tokens
+                        next_token = torch.multinomial(probs[:vocab_size], num_samples=1)
                     
                     # Validate token ID
                     token_id = next_token.item()
@@ -390,15 +422,33 @@ class DeepSeekWrapper:
                     
                     # Get next token logits based on shape
                     if len(logits.shape) == 3:
-                        next_token_logits = logits[0, -1, :vocab_size].clone()  # Limit to tokenizer vocab size
+                        # Get full logits first
+                        next_token_logits = logits[0, -1].clone()
+                        # Create a mask for valid token IDs
+                        valid_tokens_mask = torch.zeros_like(next_token_logits, dtype=torch.bool)
+                        valid_tokens_mask[:vocab_size] = True
+                        # Set invalid token logits to large negative value
+                        next_token_logits = torch.where(
+                            valid_tokens_mask,
+                            next_token_logits,
+                            torch.full_like(next_token_logits, float('-inf'))
+                        )
                     elif len(logits.shape) == 2:
-                        next_token_logits = logits[-1, :vocab_size].clone()  # Limit to tokenizer vocab size
+                        # Same for 2D logits
+                        next_token_logits = logits[-1].clone()
+                        valid_tokens_mask = torch.zeros_like(next_token_logits, dtype=torch.bool)
+                        valid_tokens_mask[:vocab_size] = True
+                        next_token_logits = torch.where(
+                            valid_tokens_mask,
+                            next_token_logits,
+                            torch.full_like(next_token_logits, float('-inf'))
+                        )
                     
-                    # Replace NaN/Inf values
-                    next_token_logits = torch.where(
-                        torch.isnan(next_token_logits) | torch.isinf(next_token_logits),
-                        torch.full_like(next_token_logits, -1e4),
-                        next_token_logits
+                    # Replace NaN/Inf values only for valid tokens
+                    next_token_logits[:vocab_size] = torch.where(
+                        torch.isnan(next_token_logits[:vocab_size]) | torch.isinf(next_token_logits[:vocab_size]),
+                        torch.full_like(next_token_logits[:vocab_size], -1e4),
+                        next_token_logits[:vocab_size]
                     )
                     
                     if token_text:
