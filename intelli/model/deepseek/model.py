@@ -113,29 +113,18 @@ class RotaryEmbedding(nn.Module):
 
 
 class Attention(nn.Module):
-    """Multi-head attention with support for rotary embeddings and LoRA-style projections."""
+    """Multi-head attention with support for rotary embeddings."""
     def __init__(self, args: ModelArgs):
         super().__init__()
         self.n_heads = args.n_heads
         self.head_dim = args.dim // args.n_heads
         
-        # Compute dimensions for different attention components
-        self.qk_nope_dim = args.qk_nope_head_dim * args.n_heads
-        self.qk_rope_dim = args.qk_rope_head_dim * args.n_heads
-        self.v_dim = args.v_head_dim * args.n_heads
-        
-        # Query uses full dimension with split between RoPE and non-RoPE parts
+        # Query uses full dimension
         self.q_proj = nn.Linear(args.dim, args.dim, bias=True)
         
-        # Key/Value use LoRA-style projections for dimension reduction
-        self.k_proj_a = nn.Linear(args.dim, args.kv_lora_rank, bias=True)
-        self.k_proj_b = nn.Linear(args.kv_lora_rank, 256, bias=True)  # 256 = qk_nope_dim + qk_rope_dim per head
-        self.k_norm = nn.LayerNorm(args.kv_lora_rank)
-        
-        self.v_proj_a = nn.Linear(args.dim, args.kv_lora_rank, bias=True)
-        self.v_proj_b = nn.Linear(args.kv_lora_rank, 256, bias=True)  # 256 = v_head_dim per head
-        self.v_norm = nn.LayerNorm(args.kv_lora_rank)
-        
+        # Key and Value use reduced dimension (256 total)
+        self.k_proj = nn.Linear(args.dim, 256, bias=True)
+        self.v_proj = nn.Linear(args.dim, 256, bias=True)
         self.o_proj = nn.Linear(args.dim, args.dim, bias=False)
         
         self.rope = RotaryEmbedding(args)
@@ -148,27 +137,47 @@ class Attention(nn.Module):
         if args.max_seq_len > args.original_seq_len:
             self.scale *= args.mscale
 
+    def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
+        """Custom state dict loading to handle weight conversion."""
+        # Handle key projection weights
+        k_proj_weight = state_dict.pop(prefix + 'k_proj.weight', None)
+        k_proj_bias = state_dict.pop(prefix + 'k_proj.bias', None)
+        if k_proj_weight is not None:
+            # Ensure weights match expected shape
+            if k_proj_weight.shape[0] != 256:
+                # Reshape if using model parallelism
+                k_proj_weight = k_proj_weight.view(-1, k_proj_weight.size(-1))
+            state_dict[prefix + 'k_proj.weight'] = k_proj_weight
+        if k_proj_bias is not None:
+            if k_proj_bias.shape[0] != 256:
+                k_proj_bias = k_proj_bias.view(-1)
+            state_dict[prefix + 'k_proj.bias'] = k_proj_bias
+            
+        # Handle value projection weights
+        v_proj_weight = state_dict.pop(prefix + 'v_proj.weight', None)
+        v_proj_bias = state_dict.pop(prefix + 'v_proj.bias', None)
+        if v_proj_weight is not None:
+            if v_proj_weight.shape[0] != 256:
+                v_proj_weight = v_proj_weight.view(-1, v_proj_weight.size(-1))
+            state_dict[prefix + 'v_proj.weight'] = v_proj_weight
+        if v_proj_bias is not None:
+            if v_proj_bias.shape[0] != 256:
+                v_proj_bias = v_proj_bias.view(-1)
+            state_dict[prefix + 'v_proj.bias'] = v_proj_bias
+            
+        # Load the rest of the state dict
+        super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
+
     def forward(self, x: torch.Tensor, start_pos: int, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         B, T, C = x.size()
         H = self.n_heads
         
-        # Query projection with split dimensions
-        q = self.q_proj(x)  # [B, T, C]
-        q = q.view(B, T, H, -1)  # [B, T, H, head_dim]
+        # Linear projections
+        q = self.q_proj(x).view(B, T, H, -1)  # [B, T, H, head_dim]
+        k = self.k_proj(x).view(B, T, 1, 256).expand(B, T, H, 256)  # [B, T, H, 256]
+        v = self.v_proj(x).view(B, T, 1, 256).expand(B, T, H, 256)  # [B, T, H, 256]
         
-        # Key projection with LoRA
-        k = self.k_proj_a(x)  # [B, T, kv_lora_rank]
-        k = self.k_norm(k)
-        k = self.k_proj_b(k)  # [B, T, 256]
-        k = k.view(B, T, 1, 256).expand(B, T, H, 256)  # [B, T, H, 256]
-        
-        # Value projection with LoRA
-        v = self.v_proj_a(x)  # [B, T, kv_lora_rank]
-        v = self.v_norm(v)
-        v = self.v_proj_b(v)  # [B, T, 256]
-        v = v.view(B, T, 1, 256).expand(B, T, H, 256)  # [B, T, H, 256]
-        
-        # Apply rotary embeddings only to the RoPE part of query and key
+        # Apply rotary embeddings only to the RoPE part of query
         q_rope_dim = self.rope_dim * 2  # Multiply by 2 since we need pairs for rotation
         q_rope = q[..., :q_rope_dim]  # [B, T, H, rope_dim*2]
         q_rope = self.rope(q_rope, start_pos)  # Apply RoPE
@@ -245,6 +254,38 @@ class Transformer(nn.Module):
                 torch.nn.init.zeros_(module.bias)
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+
+    def load_state_dict(self, state_dict, strict: bool = True):
+        """Custom state dict loading with key remapping."""
+        # Create a copy of the state dict to modify
+        new_state_dict = {}
+        
+        # Define key mappings (DeepSeek checkpoint -> our model)
+        key_map = {
+            'wq': 'q_proj',
+            'wk': 'k_proj',
+            'wv': 'v_proj',
+            'wo': 'o_proj',
+            'w1': 'gate_proj',
+            'w2': 'up_proj',
+            'w3': 'down_proj',
+        }
+        
+        # Process each key in the state dict
+        for key, value in state_dict.items():
+            # Remove 'model.' prefix if present
+            if key.startswith('model.'):
+                key = key[6:]
+                
+            # Apply key mappings
+            for old, new in key_map.items():
+                if old in key:
+                    key = key.replace(old, new)
+                    
+            new_state_dict[key] = value
+        
+        # Call parent's load_state_dict with processed dict
+        return super().load_state_dict(new_state_dict, strict=strict)
 
     def forward(self, tokens: torch.Tensor, start_pos: int = 0) -> torch.Tensor:
         B, T = tokens.size()
