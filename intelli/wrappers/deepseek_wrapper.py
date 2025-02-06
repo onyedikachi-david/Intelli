@@ -168,7 +168,8 @@ class DeepSeekWrapper:
                     "vocab_size": 151936,
                     "max_seq_len": 8192,
                     "max_batch_size": 32,
-                    "inter_dim": 8960
+                    "inter_dim": 8960,
+                    "kv_lora_rank": 256  # Critical: Set correct LoRA rank for 1.5B model
                 })
         
         # Set default values for missing arguments
@@ -187,7 +188,7 @@ class DeepSeekWrapper:
             'score_func': 'softmax',
             'route_scale': 1.0,
             'q_lora_rank': 0,
-            'kv_lora_rank': 512,
+            'kv_lora_rank': 256,  # Critical: Default to 256 for LoRA rank
             'qk_nope_head_dim': 128,
             'qk_rope_head_dim': 64,
             'v_head_dim': 128,
@@ -205,7 +206,7 @@ class DeepSeekWrapper:
         args = ModelArgs(**model_config)
         self.model = Transformer(args).to(self.device)
         
-        # Materialize lazy tensors and remove "model." prefix from keys
+        # Convert state dict
         state_dict = {}
         for key, tensor in model_data["weights"].items():
             if isinstance(tensor, LazyTensor):
@@ -213,7 +214,48 @@ class DeepSeekWrapper:
             # Remove "model." prefix from key
             if key.startswith("model."):
                 key = key[6:]  # Remove "model." prefix
-            state_dict[key] = tensor
+            
+            # Handle key/value projection weights
+            if 'k_proj.weight' in key or 'v_proj.weight' in key:
+                # Get layer number from key
+                layer_num = int(key.split('.')[1])
+                base_key = key.replace('k_proj', 'k_proj_a').replace('v_proj', 'v_proj_a')
+                
+                # Reshape weight for model parallel sharding
+                weight = tensor.view(args.kv_lora_rank, args.dim)  # [256, 1536]
+                
+                # Split into 8 shards
+                mp_size = 8
+                shard_size = args.kv_lora_rank // mp_size  # 32
+                weight = weight.view(mp_size, shard_size, args.dim)  # [8, 32, 1536]
+                
+                # Add each shard to state dict
+                for i in range(mp_size):
+                    shard_key = f"{base_key[:-7]}.{i}.weight"  # Replace .weight with shard index
+                    state_dict[shard_key] = weight[i].contiguous()
+                
+                # Add proj_b weights (shared across shards)
+                proj_b_key = key.replace('k_proj', 'k_proj_b').replace('v_proj', 'v_proj_b')
+                state_dict[proj_b_key] = torch.eye(
+                    args.dim,
+                    shard_size,
+                    device=tensor.device,
+                    dtype=tensor.dtype
+                )
+                
+                # Handle biases
+                if f"{key[:-7]}.bias" in model_data["weights"]:
+                    bias = model_data["weights"][f"{key[:-7]}.bias"]
+                    if isinstance(bias, LazyTensor):
+                        bias = bias.materialize()
+                    
+                    # Split bias into shards
+                    bias = bias.view(mp_size, shard_size)
+                    for i in range(mp_size):
+                        bias_key = f"{base_key[:-7]}.{i}.bias"
+                        state_dict[bias_key] = bias[i].contiguous()
+            else:
+                state_dict[key] = tensor
         
         # Load state dict
         self.model.load_state_dict(state_dict)

@@ -122,16 +122,24 @@ class Attention(nn.Module):
         # Store dimensions
         self.hidden_size = args.dim
         self.lora_rank = args.kv_lora_rank
+        self.mp_size = 8  # DeepSeek uses 8-way model parallel
+        self.shard_size = self.lora_rank // self.mp_size  # 32 per shard
         
         # Query uses full dimension
         self.q_proj = nn.Linear(self.hidden_size, self.hidden_size, bias=True)
         
-        # Key/Value use LoRA-style projections
-        self.k_proj_a = nn.Linear(self.hidden_size, self.lora_rank, bias=True)
-        self.k_proj_b = nn.Linear(self.lora_rank, self.hidden_size, bias=False)
+        # Key/Value use LoRA-style projections with model parallel sharding
+        self.k_proj_a = nn.ModuleList([
+            nn.Linear(self.hidden_size, self.shard_size, bias=True)
+            for _ in range(self.mp_size)
+        ])
+        self.k_proj_b = nn.Linear(self.shard_size, self.hidden_size, bias=False)
         
-        self.v_proj_a = nn.Linear(self.hidden_size, self.lora_rank, bias=True)
-        self.v_proj_b = nn.Linear(self.lora_rank, self.hidden_size, bias=False)
+        self.v_proj_a = nn.ModuleList([
+            nn.Linear(self.hidden_size, self.shard_size, bias=True)
+            for _ in range(self.mp_size)
+        ])
+        self.v_proj_b = nn.Linear(self.shard_size, self.hidden_size, bias=False)
         
         self.o_proj = nn.Linear(self.hidden_size, self.hidden_size, bias=False)
         
@@ -142,101 +150,6 @@ class Attention(nn.Module):
         if args.max_seq_len > args.original_seq_len:
             self.scale *= args.mscale
 
-    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs):
-        """Custom state dict loading to handle weight conversion and model parallel sharding."""
-        # Handle key projection weights
-        k_proj_weight = state_dict.pop(prefix + 'k_proj.weight', None)
-        k_proj_bias = state_dict.pop(prefix + 'k_proj.bias', None)
-        
-        if k_proj_weight is not None:
-            # Fixed model parallel size - DeepSeek uses 8-way MP
-            mp_size = 8
-            
-            # Verify dimensions match expected sizes
-            expected_elements = mp_size * self.lora_rank * self.hidden_size // mp_size
-            actual_elements = k_proj_weight.numel()
-            if actual_elements != expected_elements:
-                error_msgs.append(
-                    f'Size mismatch for {prefix}k_proj.weight: expected {expected_elements} elements, got {actual_elements}'
-                )
-                return
-            
-            # Reshape according to DeepSeek's MP pattern
-            k_proj_weight = k_proj_weight.view(
-                self.lora_rank,         # full LoRA rank (256)
-                self.hidden_size        # hidden_size (1536)
-            )
-            
-            # Split into MP shards
-            shard_size = self.lora_rank // mp_size  # 32 per shard
-            k_proj_weight = k_proj_weight.view(mp_size, shard_size, self.hidden_size)
-            
-            # Convert to LoRA format with proper sharding
-            for i in range(mp_size):
-                # Add proj_a weights with correct shape [32, 1536]
-                state_dict[f"{prefix}k_proj_a.weight.{i}"] = k_proj_weight[i].contiguous()
-                
-                if k_proj_bias is not None:
-                    # Split bias into shards of size [32]
-                    bias_shard = k_proj_bias[i * shard_size:(i + 1) * shard_size]
-                    state_dict[f"{prefix}k_proj_a.bias.{i}"] = bias_shard
-            
-            # proj_b weights are shared and transposed [1536, 32]
-            state_dict[f"{prefix}k_proj_b.weight"] = torch.eye(
-                self.hidden_size, 
-                shard_size,
-                device=k_proj_weight.device,
-                dtype=k_proj_weight.dtype
-            )
-        
-        # Handle value projection weights
-        v_proj_weight = state_dict.pop(prefix + 'v_proj.weight', None)
-        v_proj_bias = state_dict.pop(prefix + 'v_proj.bias', None)
-        
-        if v_proj_weight is not None:
-            # Fixed model parallel size - DeepSeek uses 8-way MP
-            mp_size = 8
-            
-            # Verify dimensions match expected sizes
-            expected_elements = mp_size * self.lora_rank * self.hidden_size // mp_size
-            actual_elements = v_proj_weight.numel()
-            if actual_elements != expected_elements:
-                error_msgs.append(
-                    f'Size mismatch for {prefix}v_proj.weight: expected {expected_elements} elements, got {actual_elements}'
-                )
-                return
-            
-            # Reshape according to DeepSeek's MP pattern
-            v_proj_weight = v_proj_weight.view(
-                self.lora_rank,         # full LoRA rank (256)
-                self.hidden_size        # hidden_size (1536)
-            )
-            
-            # Split into MP shards
-            shard_size = self.lora_rank // mp_size  # 32 per shard
-            v_proj_weight = v_proj_weight.view(mp_size, shard_size, self.hidden_size)
-            
-            # Convert to LoRA format with proper sharding
-            for i in range(mp_size):
-                # Add proj_a weights with correct shape [32, 1536]
-                state_dict[f"{prefix}v_proj_a.weight.{i}"] = v_proj_weight[i].contiguous()
-                
-                if v_proj_bias is not None:
-                    # Split bias into shards of size [32]
-                    bias_shard = v_proj_bias[i * shard_size:(i + 1) * shard_size]
-                    state_dict[f"{prefix}v_proj_a.bias.{i}"] = bias_shard
-            
-            # proj_b weights are shared and transposed [1536, 32]
-            state_dict[f"{prefix}v_proj_b.weight"] = torch.eye(
-                self.hidden_size,
-                shard_size,
-                device=v_proj_weight.device,
-                dtype=v_proj_weight.dtype
-            )
-        
-        # Let parent class handle the rest
-        super()._load_from_state_dict(state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs)
-
     def forward(self, x: torch.Tensor, start_pos: int, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         B, T, C = x.size()
         H = self.n_heads
@@ -245,13 +158,21 @@ class Attention(nn.Module):
         q = self.q_proj(x)  # [B, T, C]
         q = q.view(B, T, H, -1)  # [B, T, H, head_dim]
         
-        # Key projection with LoRA
-        k = self.k_proj_a(x)  # [B, T, lora_rank]
+        # Key projection with LoRA and model parallel
+        k_shards = []
+        for i in range(self.mp_size):
+            k_shard = self.k_proj_a[i](x)  # [B, T, shard_size]
+            k_shards.append(k_shard)
+        k = torch.cat(k_shards, dim=-1)  # [B, T, lora_rank]
         k = self.k_proj_b(k)  # [B, T, hidden_size]
         k = k.view(B, T, H, -1)  # [B, T, H, head_dim]
         
-        # Value projection with LoRA
-        v = self.v_proj_a(x)  # [B, T, lora_rank]
+        # Value projection with LoRA and model parallel
+        v_shards = []
+        for i in range(self.mp_size):
+            v_shard = self.v_proj_a[i](x)  # [B, T, shard_size]
+            v_shards.append(v_shard)
+        v = torch.cat(v_shards, dim=-1)  # [B, T, lora_rank]
         v = self.v_proj_b(v)  # [B, T, hidden_size]
         v = v.view(B, T, H, -1)  # [B, T, H, head_dim]
         
@@ -269,6 +190,11 @@ class Attention(nn.Module):
         out = torch.einsum("bhts,bshd->bthd", attn, v)
         out = out.reshape(B, T, C)
         return self.o_proj(out)
+
+    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs):
+        """Custom state dict loading to handle model parallel sharding."""
+        # Let parent class handle non-sharded weights
+        super()._load_from_state_dict(state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs)
 
 
 class FeedForward(nn.Module):
