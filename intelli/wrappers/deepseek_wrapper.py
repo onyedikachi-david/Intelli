@@ -213,6 +213,10 @@ class DeepSeekWrapper:
             response_text = ""
             consecutive_spaces = 0
             
+            # Get vocabulary size from config
+            vocab_size = self.config["vocab_size"]
+            print(f"Vocabulary size: {vocab_size}")
+            
             # Generate tokens
             print(f"\nGeneration started (max_length={self.max_length})...")
             
@@ -238,9 +242,9 @@ class DeepSeekWrapper:
                 
                 # Get last token logits based on shape
                 if len(logits.shape) == 3:
-                    next_token_logits = logits[0, -1, :].clone()
+                    next_token_logits = logits[0, -1, :vocab_size].clone()  # Limit to vocab size
                 elif len(logits.shape) == 2:
-                    next_token_logits = logits[-1, :].clone()
+                    next_token_logits = logits[-1, :vocab_size].clone()  # Limit to vocab size
                 else:
                     raise ValueError(f"Unexpected logits shape: {logits.shape}")
                 
@@ -262,10 +266,11 @@ class DeepSeekWrapper:
                     # Apply repetition penalty
                     if len(generated) > 0:
                         for token in generated:
-                            if next_token_logits[token] > 0:
-                                next_token_logits[token] /= self.repetition_penalty
-                            else:
-                                next_token_logits[token] *= self.repetition_penalty
+                            if token < vocab_size:  # Only apply to valid token IDs
+                                if next_token_logits[token] > 0:
+                                    next_token_logits[token] /= self.repetition_penalty
+                                else:
+                                    next_token_logits[token] *= self.repetition_penalty
                     
                     # Apply temperature scaling
                     if self.temperature > 0:
@@ -326,6 +331,11 @@ class DeepSeekWrapper:
                         # Sample from the filtered distribution
                         next_token = torch.multinomial(probs, num_samples=1)
                     
+                    # Ensure token ID is within vocabulary range
+                    if next_token.item() >= vocab_size:
+                        print(f"\nWarning: Token ID {next_token.item()} out of range, using UNK token")
+                        next_token = torch.tensor([self.tokenizer.sp_model.unk_id()], device=self.device)
+                    
                     # Add the chosen token to the sequence
                     generated.append(next_token.item())
                     
@@ -345,9 +355,9 @@ class DeepSeekWrapper:
                     
                     # Get next token logits based on shape
                     if len(logits.shape) == 3:
-                        next_token_logits = logits[0, -1, :].clone()
+                        next_token_logits = logits[0, -1, :vocab_size].clone()  # Limit to vocab size
                     elif len(logits.shape) == 2:
-                        next_token_logits = logits[-1, :].clone()
+                        next_token_logits = logits[-1, :vocab_size].clone()  # Limit to vocab size
                     
                     # Replace NaN/Inf values
                     next_token_logits = torch.where(
