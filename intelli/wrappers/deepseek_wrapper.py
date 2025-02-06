@@ -93,7 +93,7 @@ class DeepSeekWrapper:
             'dim': self.config["hidden_size"],
             'n_layers': self.config["num_hidden_layers"],
             'n_heads': self.config["num_attention_heads"],
-            'vocab_size': self.config["vocab_size"],  # Use full vocab size from config
+            'vocab_size': self.tokenizer.sp_model.get_piece_size(),  # Use tokenizer vocab size
             'max_seq_len': self.config["max_sequence_length"],
             'max_batch_size': 32,
             'inter_dim': self.config["intermediate_size"],
@@ -160,6 +160,13 @@ class DeepSeekWrapper:
                 for i in range(mp_size):
                     bias_key = f"{base_key[:-5]}.{i}.bias"  # Replace .bias with shard index
                     state_dict[bias_key] = bias[i].contiguous()
+            # Handle embedding and output layers
+            elif key in ['embed_tokens.weight', 'lm_head.weight']:
+                # Resize embedding/output layers to match tokenizer vocab size
+                vocab_size = self.tokenizer.sp_model.get_piece_size()
+                if tensor.size(0) > vocab_size:
+                    tensor = tensor[:vocab_size]
+                state_dict[key] = tensor
             else:
                 state_dict[key] = tensor
         
@@ -191,6 +198,9 @@ class DeepSeekWrapper:
                 print(f"Output shape: {test_output.shape}")
                 print(f"Output dtype: {test_output.dtype}")
                 print(f"Output device: {test_output.device}")
+                print(f"Output has NaN: {torch.isnan(test_output).any().item()}")
+                print(f"Output has Inf: {torch.isinf(test_output).any().item()}")
+                print(f"Output stats - min: {test_output.min().item():.2f}, max: {test_output.max().item():.2f}, mean: {test_output.mean().item():.2f}")
             except Exception as e:
                 print(f"Test forward pass failed: {str(e)}")
                 raise
