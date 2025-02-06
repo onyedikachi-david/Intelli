@@ -93,7 +93,7 @@ class DeepSeekWrapper:
             'dim': self.config["hidden_size"],
             'n_layers': self.config["num_hidden_layers"],
             'n_heads': self.config["num_attention_heads"],
-            'vocab_size': self.config["vocab_size"],
+            'vocab_size': self.tokenizer.sp_model.get_piece_size(),  # Use tokenizer vocab size
             'max_seq_len': self.config["max_sequence_length"],
             'max_batch_size': 32,
             'inter_dim': self.config["intermediate_size"],
@@ -117,6 +117,9 @@ class DeepSeekWrapper:
             # Remove "model." prefix from key
             if key.startswith("model."):
                 key = key[6:]  # Remove "model." prefix
+            
+            # Convert tensor to correct dtype
+            tensor = tensor.to(self.dtype)
             
             # Handle key/value projection weights
             if 'k_proj.weight' in key or 'v_proj.weight' in key:
@@ -162,8 +165,11 @@ class DeepSeekWrapper:
                     state_dict[bias_key] = bias[i].contiguous()
             # Handle embedding and output layers
             elif key in ['embed_tokens.weight', 'lm_head.weight']:
-                # Keep original vocab size for embeddings
-                state_dict[key] = tensor.to(self.dtype)
+                # Resize embedding/output layers to match tokenizer vocab size
+                vocab_size = self.tokenizer.sp_model.get_piece_size()
+                if tensor.size(0) > vocab_size:
+                    tensor = tensor[:vocab_size]
+                state_dict[key] = tensor
             else:
                 state_dict[key] = tensor
         
@@ -249,13 +255,8 @@ class DeepSeekWrapper:
             consecutive_spaces = 0
             
             # Get vocabulary sizes
-            config_vocab_size = self.config["vocab_size"]
             tokenizer_vocab_size = self.tokenizer.sp_model.get_piece_size()
-            # Use config vocab size since model was trained with this vocabulary
-            vocab_size = config_vocab_size
-            print(f"Config vocab size: {config_vocab_size}")
             print(f"Tokenizer vocab size: {tokenizer_vocab_size}")
-            print(f"Using vocab size: {vocab_size}")
             
             # Get special token IDs
             special_tokens = {
@@ -292,9 +293,6 @@ class DeepSeekWrapper:
                 print(f"Output dtype: {logits.dtype}")
                 print(f"Output device: {logits.device}")
                 
-                # Convert to float32 for better numerical stability
-                logits = logits.to(torch.float32)
-                
                 # Get last token logits based on shape
                 if len(logits.shape) == 3:
                     next_token_logits = logits[0, -1].clone()
@@ -303,15 +301,11 @@ class DeepSeekWrapper:
                 else:
                     raise ValueError(f"Unexpected logits shape: {logits.shape}")
                 
+                # Convert to float32 for better numerical stability
+                next_token_logits = next_token_logits.to(torch.float32)
+                
                 # Print raw logits stats
                 print(f"Raw logits - min: {next_token_logits.min().item():.2f}, max: {next_token_logits.max().item():.2f}, mean: {next_token_logits.mean().item():.2f}")
-                
-                # Create mapping between model and tokenizer vocabularies
-                model_vocab_size = self.config["vocab_size"]
-                tokenizer_vocab_size = self.tokenizer.sp_model.get_piece_size()
-                
-                # Only keep logits for valid tokenizer tokens
-                next_token_logits = next_token_logits[:tokenizer_vocab_size]
                 
                 # Replace NaN/Inf values
                 next_token_logits = torch.where(
@@ -320,8 +314,19 @@ class DeepSeekWrapper:
                     next_token_logits
                 )
                 
-                # Print logits stats for debugging
-                print(f"Raw logits - min: {next_token_logits.min().item():.2f}, max: {next_token_logits.max().item():.2f}, mean: {next_token_logits.mean().item():.2f}")
+                # Apply softmax for numerical stability
+                next_token_logits = torch.log_softmax(next_token_logits, dim=-1)
+                
+                # Debug probability distribution
+                probs = torch.softmax(next_token_logits, dim=-1)
+                print(f"Probability sum: {probs.sum().item():.6f}")
+                print(f"Max probability: {probs.max().item():.6f}")
+                print(f"Has valid distribution: {(probs >= 0).all().item() and (probs <= 1).all().item()}")
+                
+                top_probs, top_indices = probs.topk(5)
+                print(f"Top 5 probabilities: {top_probs.tolist()}")
+                print(f"Top 5 token IDs: {top_indices.tolist()}")
+                print("Top 5 tokens:", [self.tokenizer.decode([idx.item()]) for idx in top_indices])
                 
                 for i in range(self.max_length):
                     # Apply repetition penalty
@@ -341,13 +346,8 @@ class DeepSeekWrapper:
                     
                     # Apply top-k filtering
                     if self.top_k > 0:
-                        values, _ = torch.topk(scaled_logits, min(self.top_k, tokenizer_vocab_size))
-                        min_value = values[-1]
-                        scaled_logits = torch.where(
-                            scaled_logits < min_value,
-                            torch.full_like(scaled_logits, float('-inf')),
-                            scaled_logits
-                        )
+                        indices_to_remove = torch.topk(scaled_logits, k=min(self.top_k, tokenizer_vocab_size))[1]
+                        scaled_logits[indices_to_remove] = float('-inf')
                     
                     # Apply top-p filtering
                     if self.top_p < 1.0:
@@ -363,16 +363,6 @@ class DeepSeekWrapper:
                     
                     # Apply softmax
                     probs = torch.softmax(scaled_logits, dim=-1)
-                    
-                    # Debug probability distribution
-                    if i == 0:
-                        print(f"Probability sum: {probs.sum().item():.6f}")
-                        print(f"Max probability: {probs.max().item():.6f}")
-                        print(f"Has valid distribution: {(probs >= 0).all().item() and (probs <= 1).all().item()}")
-                        top_probs, top_indices = probs.topk(5)
-                        print(f"Top 5 probabilities: {top_probs.tolist()}")
-                        print(f"Top 5 token IDs: {top_indices.tolist()}")
-                        print("Top 5 tokens:", [self.tokenizer.decode([idx.item()]) for idx in top_indices])
                     
                     # Sample next token
                     next_token = torch.multinomial(probs, num_samples=1)
@@ -413,35 +403,21 @@ class DeepSeekWrapper:
                         print(f"\rGenerated ({i+1} tokens): {response_text}", end="", flush=True)
                     
                     # Get next token logits
-                    outputs = self.model(input_ids)
-                    if isinstance(outputs, tuple):
-                        logits = outputs[0]
-                    else:
-                        logits = outputs
-                    
-                    logits = logits.to(torch.float32)
-                    
-                    if len(logits.shape) == 3:
-                        next_token_logits = logits[0, -1].clone()
-                    elif len(logits.shape) == 2:
-                        next_token_logits = logits[-1].clone()
-                    
-                    # Create mapping between model and tokenizer vocabularies
-                    model_vocab_size = self.config["vocab_size"]
-                    tokenizer_vocab_size = self.tokenizer.sp_model.get_piece_size()
-                    
-                    # Only keep logits for valid tokenizer tokens
-                    next_token_logits = next_token_logits[:tokenizer_vocab_size]
-                    
-                    # Replace NaN/Inf values
-                    next_token_logits = torch.where(
-                        torch.isnan(next_token_logits) | torch.isinf(next_token_logits),
-                        torch.full_like(next_token_logits, -1e4),
-                        next_token_logits
-                    )
-                    
-                    # Print logits stats for debugging
-                    print(f"Raw logits - min: {next_token_logits.min().item():.2f}, max: {next_token_logits.max().item():.2f}, mean: {next_token_logits.mean().item():.2f}")
+                    with torch.no_grad():
+                        outputs = self.model(input_ids)
+                        if isinstance(outputs, tuple):
+                            logits = outputs[0]
+                        else:
+                            logits = outputs
+                        
+                        if len(logits.shape) == 3:
+                            next_token_logits = logits[0, -1].clone()
+                        elif len(logits.shape) == 2:
+                            next_token_logits = logits[-1].clone()
+                        
+                        # Convert to float32 and apply log_softmax
+                        next_token_logits = next_token_logits.to(torch.float32)
+                        next_token_logits = torch.log_softmax(next_token_logits, dim=-1)
                     
                     # Check for stop conditions
                     if token_id in [self.tokenizer.eos_token_id, self.tokenizer.user_token_id]:
