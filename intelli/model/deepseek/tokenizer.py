@@ -55,42 +55,46 @@ class DeepSeekTokenizer:
     
     def _write_spm_model(self, output_path: str):
         """Write a SentencePiece model file from JSON vocab."""
-        # Basic SPM model structure
-        model_proto = {
-            'pieces': [],
-            'trainer_spec': {
-                'vocab_size': len(self.tokenizer_json.get('vocab', {})),
-                'character_coverage': 1.0,
-                'model_type': 'BPE',
-                'input_format': 'piece',
-                'hard_vocab_limit': False,
-                'pad_id': self.tokenizer_json.get('pad_token_id', 0),
-                'bos_id': self.tokenizer_json.get('bos_token_id', 1),
-                'eos_id': self.tokenizer_json.get('eos_token_id', 2),
-                'unk_id': self.tokenizer_json.get('unk_token_id', 3),
-            }
-        }
-        
-        # Add vocab pieces
-        vocab = self.tokenizer_json.get('vocab', {})
-        for token, idx in sorted(vocab.items(), key=lambda x: x[1]):
-            model_proto['pieces'].append({
-                'piece': token,
-                'score': 0.0,
-                'type': 'NORMAL'
-            })
-        
-        # Write binary model file
-        import struct
-        with open(output_path, 'wb') as f:
-            # Write magic number and version
-            f.write(b'\x01\x02\x03\x04\x05\x06\x07\x08')
-            f.write(struct.pack('<Q', 0x0000000000000001))
+        # Create a temporary text file with the vocabulary
+        import tempfile
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as vocab_file:
+            # Write each token on a new line with its score
+            vocab = self.tokenizer_json.get('vocab', {})
+            for token, _ in sorted(vocab.items(), key=lambda x: x[1]):
+                # Escape special characters in the token
+                escaped_token = token.encode('unicode_escape').decode('utf-8')
+                vocab_file.write(f"{escaped_token}\t0.0\n")
+            vocab_file.flush()
             
-            # Write model proto
-            proto_bytes = str(model_proto).encode('utf-8')
-            f.write(struct.pack('<Q', len(proto_bytes)))
-            f.write(proto_bytes)
+            # Train a new SentencePiece model
+            import sentencepiece as spm
+            spm.SentencePieceTrainer.Train(
+                f'--input={vocab_file.name} '
+                f'--model_prefix={output_path[:-6]} '  # Remove .model suffix
+                '--vocab_size=32000 '  # Large enough for most vocabularies
+                '--character_coverage=1.0 '
+                '--model_type=bpe '
+                '--pad_id=0 '
+                '--bos_id=1 '
+                '--eos_id=2 '
+                '--unk_id=3 '
+                '--input_format=tsv '
+                '--hard_vocab_limit=false '
+                '--normalization_rule_name=identity '
+                '--treat_whitespace_as_suffix=true '
+                '--add_dummy_prefix=false '
+                '--remove_extra_whitespaces=false'
+            )
+            
+            # Clean up
+            os.unlink(vocab_file.name)
+            
+            # Move the trained model to the desired location
+            import shutil
+            shutil.move(f"{output_path[:-6]}.model", output_path)
+            # Clean up the extra files
+            if os.path.exists(f"{output_path[:-6]}.vocab"):
+                os.unlink(f"{output_path[:-6]}.vocab")
     
     def encode(self, text: str, add_bos: bool = True, add_eos: bool = True) -> List[int]:
         """
