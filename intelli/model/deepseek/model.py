@@ -61,17 +61,18 @@ class RotaryEmbedding(nn.Module):
         dim = args.qk_rope_head_dim
         base = args.rope_theta
         
-        # Compute position embeddings
-        inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2).float() / dim))
-        self.register_buffer("inv_freq", inv_freq)
+        # Compute position embeddings but don't register as buffers
+        self.inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2).float() / dim))
         
         # Apply scaling for extended context
         if args.max_seq_len > args.original_seq_len:
             scale = math.log(args.rope_factor) / 2.0
-            inv_freq = inv_freq * args.rope_factor ** (scale / dim)
-            self.register_buffer("inv_freq_scaled", inv_freq)
+            self.inv_freq = self.inv_freq * args.rope_factor ** (scale / dim)
 
     def forward(self, x: torch.Tensor, start_pos: int) -> torch.Tensor:
+        # Move inv_freq to correct device
+        self.inv_freq = self.inv_freq.to(x.device)
+        
         t = torch.arange(start_pos, start_pos + x.size(1), device=x.device)
         freqs = torch.einsum("i,j->ij", t, self.inv_freq)
         emb = torch.cat((freqs, freqs), dim=-1)

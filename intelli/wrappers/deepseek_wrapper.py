@@ -109,45 +109,50 @@ class DeepSeekWrapper:
                     "dim": 8192,
                     "n_layers": 80,
                     "n_heads": 64,
-                    "vocab_size": 32000,
+                    "vocab_size": 151936,
                     "max_seq_len": 8192,
-                    "max_batch_size": 32
+                    "max_batch_size": 32,
+                    "inter_dim": 24576
                 })
             elif "32b" in self.model_variant.lower():
                 model_config.update({
                     "dim": 6144,
                     "n_layers": 60,
                     "n_heads": 48,
-                    "vocab_size": 32000,
+                    "vocab_size": 151936,
                     "max_seq_len": 8192,
-                    "max_batch_size": 32
+                    "max_batch_size": 32,
+                    "inter_dim": 18432
                 })
             elif "14b" in self.model_variant.lower():
                 model_config.update({
                     "dim": 5120,
                     "n_layers": 40,
                     "n_heads": 40,
-                    "vocab_size": 32000,
+                    "vocab_size": 151936,
                     "max_seq_len": 8192,
-                    "max_batch_size": 32
+                    "max_batch_size": 32,
+                    "inter_dim": 15360
                 })
             elif "8b" in self.model_variant.lower() or "7b" in self.model_variant.lower():
                 model_config.update({
                     "dim": 4096,
                     "n_layers": 32,
                     "n_heads": 32,
-                    "vocab_size": 32000,
+                    "vocab_size": 151936,
                     "max_seq_len": 8192,
-                    "max_batch_size": 32
+                    "max_batch_size": 32,
+                    "inter_dim": 12288
                 })
             elif "1.5b" in self.model_variant.lower():
                 model_config.update({
-                    "dim": 2048,
-                    "n_layers": 24,
-                    "n_heads": 16,
-                    "vocab_size": 32000,
+                    "dim": 1536,
+                    "n_layers": 28,
+                    "n_heads": 12,
+                    "vocab_size": 151936,
                     "max_seq_len": 8192,
-                    "max_batch_size": 32
+                    "max_batch_size": 32,
+                    "inter_dim": 8960
                 })
         
         # Set default values for missing arguments
@@ -155,7 +160,7 @@ class DeepSeekWrapper:
             'dtype': 'bf16',
             'max_batch_size': 32,
             'max_seq_len': 8192,
-            'inter_dim': 10944,
+            'inter_dim': 8960,  # Updated for 1.5B model
             'moe_inter_dim': 1408,
             'n_dense_layers': 1,
             'n_routed_experts': 64,
