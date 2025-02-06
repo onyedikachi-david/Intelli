@@ -244,9 +244,16 @@ class DeepSeekWrapper:
                 else:
                     raise ValueError(f"Unexpected logits shape: {logits.shape}")
                 
-                # Check for inf/nan values
-                print(f"Has inf values: {torch.isinf(next_token_logits).any().item()}")
-                print(f"Has nan values: {torch.isnan(next_token_logits).any().item()}")
+                # Replace NaN/Inf values with large negative numbers
+                next_token_logits = torch.where(
+                    torch.isnan(next_token_logits) | torch.isinf(next_token_logits),
+                    torch.full_like(next_token_logits, -1e4),
+                    next_token_logits
+                )
+                
+                # Check for inf/nan values after replacement
+                print(f"Has inf values after fix: {torch.isinf(next_token_logits).any().item()}")
+                print(f"Has nan values after fix: {torch.isnan(next_token_logits).any().item()}")
                 
                 # Print initial logits stats for debugging
                 print(f"Initial logits - min: {next_token_logits.min().item():.2f}, max: {next_token_logits.max().item():.2f}, mean: {next_token_logits.mean().item():.2f}")
@@ -313,12 +320,8 @@ class DeepSeekWrapper:
                     # Ensure valid probabilities
                     if torch.isnan(probs).any() or (probs.sum() - 1.0).abs() > 1e-3:
                         print("\nWarning: Invalid probabilities detected, falling back to greedy selection")
-                        # Use greedy selection instead of argmax
-                        next_token = torch.where(
-                            scaled_logits == scaled_logits.max(),
-                            torch.ones_like(scaled_logits),
-                            torch.zeros_like(scaled_logits)
-                        ).nonzero()[0].unsqueeze(0)
+                        # Use argmax directly for greedy selection
+                        next_token = torch.argmax(scaled_logits).reshape(1)
                     else:
                         # Sample from the filtered distribution
                         next_token = torch.multinomial(probs, num_samples=1)
@@ -345,6 +348,13 @@ class DeepSeekWrapper:
                         next_token_logits = logits[0, -1, :].clone()
                     elif len(logits.shape) == 2:
                         next_token_logits = logits[-1, :].clone()
+                    
+                    # Replace NaN/Inf values
+                    next_token_logits = torch.where(
+                        torch.isnan(next_token_logits) | torch.isinf(next_token_logits),
+                        torch.full_like(next_token_logits, -1e4),
+                        next_token_logits
+                    )
                     
                     # Decode the token and add to response
                     token_text = self.tokenizer.decode([next_token.item()], skip_special_tokens=True)
